@@ -164,12 +164,17 @@ class StorageService {
     String? label,
     int? viewerId,
     String? proxyServer,
+    String? deviceId,
   }) async {
     final id = DateTime.now().microsecondsSinceEpoch.toString();
     var isolation = ProfileFingerprint.generate(id);
     final proxy = proxyServer?.trim();
     if (proxy != null && proxy.isNotEmpty) {
       isolation = isolation.copyWith(proxyServer: proxy);
+    }
+    final device = deviceId?.trim();
+    if (device != null && device.isNotEmpty) {
+      isolation = isolation.copyWith(deviceId: device);
     }
     final account = MaxAccount(
       id: id,

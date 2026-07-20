@@ -802,6 +802,8 @@ class AppState extends ChangeNotifier {
     String? label,
     int? viewerId,
     String? proxyServer,
+    String? deviceId,
+    bool openBrowser = true,
   }) async {
     final account = await storage.addAccountFromToken(
       apiToken: apiToken,
@@ -809,10 +811,47 @@ class AppState extends ChangeNotifier {
       label: label,
       viewerId: viewerId,
       proxyServer: proxyServer,
+      deviceId: deviceId,
     );
     notifyListeners();
-    await selectAccountById(account.id, openBrowser: true);
+    if (openBrowser) {
+      await selectAccountById(account.id, openBrowser: true);
+    }
     return account;
+  }
+
+  /// Bulk create from parsed token files. Does not open a browser per account.
+  Future<List<MaxAccount>> addAccountsFromTokenImports({
+    required List<({String apiToken, String? label, int? viewerId, String? deviceId})> items,
+    String? proxyServer,
+  }) async {
+    final created = <MaxAccount>[];
+    final existingTokens = accounts
+        .map((a) => a.apiToken)
+        .whereType<String>()
+        .map((t) => t.trim())
+        .where((t) => t.isNotEmpty)
+        .toSet();
+
+    for (final item in items) {
+      final token = item.apiToken.trim();
+      if (token.isEmpty || existingTokens.contains(token)) continue;
+      existingTokens.add(token);
+      final account = await storage.addAccountFromToken(
+        apiToken: token,
+        label: item.label,
+        viewerId: item.viewerId,
+        proxyServer: proxyServer,
+        deviceId: item.deviceId,
+      );
+      created.add(account);
+    }
+
+    if (created.isNotEmpty) {
+      notifyListeners();
+      await selectAccountById(created.last.id, openBrowser: false);
+    }
+    return created;
   }
 
   Future<void> applyCapturedToken(String token, String? phone) async {

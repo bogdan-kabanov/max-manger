@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/app_update_service.dart';
-import '../widgets/account_sidebar.dart';
+import '../widgets/app_nav_shell.dart';
 import '../widgets/automation_panel.dart';
 import '../widgets/hub_center_panel.dart';
 
@@ -175,7 +175,7 @@ class _HubScreenState extends State<HubScreen> {
           Expanded(
             child: Row(
               children: [
-                AccountSidebar(
+                AppNavShell(
                   onCheckUpdates: () => _checkUpdates(silent: false),
                   checkingUpdates: _checkingUpdate,
                   updateAvailable: update != null,

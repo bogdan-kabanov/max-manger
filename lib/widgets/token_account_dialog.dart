@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../providers/app_state.dart';
 import '../services/max_auth_service.dart';
+import '../services/token_file_parser.dart';
 
 class TokenAccountDialog extends StatefulWidget {
   const TokenAccountDialog({super.key});
@@ -27,6 +28,8 @@ class _TokenAccountDialogState extends State<TokenAccountDialog> {
   bool _loading = false;
   String? _error;
   bool _canAddWithoutVerify = false;
+  int? _parsedViewerId;
+  String? _parsedDeviceId;
 
   @override
   void dispose() {
@@ -42,6 +45,12 @@ class _TokenAccountDialogState extends State<TokenAccountDialog> {
     return value.isEmpty ? null : value;
   }
 
+  void _reparseTokenField() {
+    final parsed = TokenFileParser.parse(_tokenController.text);
+    _parsedViewerId = parsed.viewerId;
+    _parsedDeviceId = parsed.deviceId;
+  }
+
   Future<void> _addAccount({
     required String token,
     String? phone,
@@ -52,22 +61,24 @@ class _TokenAccountDialogState extends State<TokenAccountDialog> {
           apiToken: token,
           phone: phone,
           label: label,
-          viewerId: viewerId,
+          viewerId: viewerId ?? _parsedViewerId,
           proxyServer: _proxy,
+          deviceId: _parsedDeviceId,
         );
     if (!mounted) return;
     Navigator.pop(context, true);
   }
 
   Future<void> _submit({bool skipVerify = false}) async {
-    final token = MaxAuthService.normalizeTokenInput(_tokenController.text);
-    if (token != _tokenController.text.trim()) {
-      _tokenController.text = token;
-    }
-    final formatError = MaxAuthService.validateTokenFormat(token);
-    if (formatError != null) {
+    final parsed = TokenFileParser.parse(_tokenController.text);
+    _parsedViewerId = parsed.viewerId;
+    _parsedDeviceId = parsed.deviceId;
+
+    final token = parsed.token ?? MaxAuthService.normalizeTokenInput(_tokenController.text);
+    final formatError = parsed.error ?? MaxAuthService.validateTokenFormat(token);
+    if (formatError != null || token.isEmpty) {
       setState(() {
-        _error = formatError;
+        _error = formatError ?? 'Не удалось распознать токен';
         _canAddWithoutVerify = false;
       });
       return;
@@ -96,7 +107,7 @@ class _TokenAccountDialogState extends State<TokenAccountDialog> {
           token: token,
           phone: phone,
           label: label,
-          viewerId: result.profileId,
+          viewerId: result.profileId ?? _parsedViewerId,
         );
         return;
       }
@@ -124,11 +135,14 @@ class _TokenAccountDialogState extends State<TokenAccountDialog> {
         : phone ?? 'Аккаунт';
 
     setState(() => _loading = false);
-    await _addAccount(token: token, phone: phone, label: label);
+    await _addAccount(token: token, phone: phone, label: label, viewerId: _parsedViewerId);
   }
 
   @override
   Widget build(BuildContext context) {
+    final previewParsed = TokenFileParser.parse(_tokenController.text);
+    final previewToken = previewParsed.token ?? '';
+
     return AlertDialog(
       title: const Text('Вход по токену'),
       content: SizedBox(
@@ -139,16 +153,14 @@ class _TokenAccountDialogState extends State<TokenAccountDialog> {
             mainAxisSize: MainAxisSize.min,
             children: [
               const Text(
-                'Войдите на web.max.ru, затем скопируйте токен из консоли браузера.',
+                'Вставьте токен An_… или весь скрипт с localStorage.setItem(\'__oneme_auth\', …).',
                 style: TextStyle(fontSize: 13),
               ),
               const SizedBox(height: 12),
               const Text(
                 '1. Откройте web.max.ru → войдите по QR\n'
                 '2. F12 → Console\n'
-                '3. Выполните одну строку:\n'
-                'copy((()=>{const a=JSON.parse(localStorage.getItem("__oneme_auth")||"{}");'
-                'return a.tokenAttrs?.token||a.token||"";})())\n'
+                '3. Скопируйте токен или весь sessionStorage/localStorage скрипт\n'
                 '4. Вставьте сюда. Токен длинный и начинается с An_.',
                 style: TextStyle(fontSize: 12, height: 1.45),
               ),
@@ -156,16 +168,20 @@ class _TokenAccountDialogState extends State<TokenAccountDialog> {
               TextField(
                 controller: _tokenController,
                 decoration: const InputDecoration(
-                  labelText: 'Токен сессии',
-                  hintText: 'An_Sx6HQ9HDi…',
+                  labelText: 'Токен / скрипт сессии',
+                  hintText: 'An_Sx6HQ9HDi… или localStorage.setItem…',
                 ),
                 maxLines: 6,
                 style: const TextStyle(fontFamily: 'Consolas', fontSize: 11),
-                onChanged: (_) => setState(() => _error = null),
+                onChanged: (_) {
+                  _reparseTokenField();
+                  setState(() => _error = null);
+                },
               ),
               const SizedBox(height: 4),
               Text(
-                'Распознано: ${MaxAuthService.tokenPreview(_tokenController.text)}',
+                'Распознано: ${MaxAuthService.tokenPreview(previewToken)}'
+                '${previewParsed.viewerId != null ? ' · viewerId ${previewParsed.viewerId}' : ''}',
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 11),
               ),
               const SizedBox(height: 4),
