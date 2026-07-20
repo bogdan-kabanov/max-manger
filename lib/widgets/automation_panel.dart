@@ -6,10 +6,10 @@ import '../models/map_workflow.dart';
 import '../providers/app_state.dart';
 import '../services/browser_session_manager.dart';
 import 'ai_chat_panel.dart';
+import 'map_sidebar/account_chats_tab.dart';
 import 'map_sidebar/account_map_panel.dart';
-import 'map_sidebar/broadcast_map_panel.dart';
-import 'map_sidebar/group_map_panel.dart';
 import 'map_sidebar/map_log_panel.dart';
+import 'map_sidebar/workflow_groups_tab.dart';
 import 'channel_catalog_panel.dart';
 import 'mother_panel.dart';
 import 'scenario_panel.dart';
@@ -50,64 +50,12 @@ class _AutomationPanelState extends State<AutomationPanel> {
     _replyController.clear();
   }
 
-  Widget _buildBody(AppState state) {
-    final workflowId = state.selectedWorkflowNodeId;
-    if (workflowId != null) {
-      final node = state.workflowNodes.byId(workflowId);
-      if (node != null) {
-        if (node.isGroup) {
-          return GroupMapPanel(key: ValueKey(node.id), node: node);
-        }
-        if (node.isBroadcast) {
-          return BroadcastMapPanel(key: ValueKey(node.id), node: node);
-        }
-      }
-    }
-
-    final account = state.selectedAccount;
-    if (account != null) {
-      return _AutomationTabs(
-        key: ValueKey('account-${account.id}'),
-        includeAccountTab: true,
-        accountId: account.id,
-        state: state,
-        nameController: _nameController,
-        keywordsController: _keywordsController,
-        replyController: _replyController,
-        onAddRule: () => _addRule(context),
-      );
-    }
-
-    return _AutomationTabs(
-      key: const ValueKey('global'),
-      includeAccountTab: false,
-      state: state,
-      nameController: _nameController,
-      keywordsController: _keywordsController,
-      replyController: _replyController,
-      onAddRule: () => _addRule(context),
-    );
-  }
-
   String _headerTitle(AppState state) {
-    final workflowId = state.selectedWorkflowNodeId;
-    if (workflowId != null) {
-      final node = state.workflowNodes.byId(workflowId);
-      if (node != null) {
-        return node.isGroup ? 'Настройки группы' : 'Настройки рассылки';
-      }
-    }
     if (state.selectedAccount != null) return 'Аккаунт';
     return 'Автоматизация';
   }
 
-  String? _headerSubtitle(AppState state) {
-    final workflowId = state.selectedWorkflowNodeId;
-    if (workflowId != null) {
-      return state.workflowNodes.byId(workflowId)?.title;
-    }
-    return state.selectedAccount?.label;
-  }
+  String? _headerSubtitle(AppState state) => state.selectedAccount?.label;
 
   @override
   Widget build(BuildContext context) {
@@ -136,7 +84,17 @@ class _AutomationPanelState extends State<AutomationPanel> {
             ),
           ),
           const SizedBox(height: 8),
-          Expanded(child: _buildBody(state)),
+          Expanded(
+            child: _AutomationTabs(
+              key: ValueKey(state.selectedAccount?.id ?? 'global'),
+              accountId: state.selectedAccount?.id,
+              state: state,
+              nameController: _nameController,
+              keywordsController: _keywordsController,
+              replyController: _replyController,
+              onAddRule: () => _addRule(context),
+            ),
+          ),
           const MapLogPanel(),
         ],
       ),
@@ -144,10 +102,9 @@ class _AutomationPanelState extends State<AutomationPanel> {
   }
 }
 
-class _AutomationTabs extends StatelessWidget {
+class _AutomationTabs extends StatefulWidget {
   const _AutomationTabs({
     super.key,
-    required this.includeAccountTab,
     required this.state,
     required this.nameController,
     required this.keywordsController,
@@ -156,7 +113,6 @@ class _AutomationTabs extends StatelessWidget {
     this.accountId,
   });
 
-  final bool includeAccountTab;
   final String? accountId;
   final AppState state;
   final TextEditingController nameController;
@@ -164,7 +120,18 @@ class _AutomationTabs extends StatelessWidget {
   final TextEditingController replyController;
   final VoidCallback onAddRule;
 
-  static const _automationTabLabels = [
+  @override
+  State<_AutomationTabs> createState() => _AutomationTabsState();
+}
+
+class _AutomationTabsState extends State<_AutomationTabs> with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  String? _lastAutoJumpNodeId;
+
+  bool get _hasAccount => widget.accountId != null;
+
+  List<String> get _labels => [
+    if (_hasAccount) ...['Аккаунт', 'Группы', 'Чаты'],
     'Автоответы',
     'ИИ-бот',
     'Сценарии',
@@ -172,54 +139,104 @@ class _AutomationTabs extends StatelessWidget {
     'Каналы',
   ];
 
+  int get _groupsTabIndex => _hasAccount ? 1 : -1;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: _labels.length, vsync: this);
+    _maybeJumpToGroups(widget.state);
+  }
+
+  @override
+  void didUpdateWidget(covariant _AutomationTabs oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.accountId != widget.accountId ||
+        oldWidget.state.selectedWorkflowNodeId != widget.state.selectedWorkflowNodeId) {
+      final labels = _labels;
+      if (_tabController.length != labels.length) {
+        final oldIndex = _tabController.index;
+        _tabController.dispose();
+        _tabController = TabController(
+          length: labels.length,
+          vsync: this,
+          initialIndex: oldIndex.clamp(0, labels.length - 1),
+        );
+      }
+      _maybeJumpToGroups(widget.state);
+    }
+  }
+
+  void _maybeJumpToGroups(AppState state) {
+    if (!_hasAccount || _groupsTabIndex < 0) return;
+    final nodeId = state.selectedWorkflowNodeId;
+    if (nodeId == null || nodeId == _lastAutoJumpNodeId) return;
+    final node = state.workflowNodes.byId(nodeId);
+    if (node == null) return;
+    if (!node.isGroup && !node.isBroadcast) return;
+    _lastAutoJumpNodeId = nodeId;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_tabController.index != _groupsTabIndex) {
+        _tabController.animateTo(_groupsTabIndex);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final browser = context.watch<BrowserSessionManager>();
-    final tabLabels = [
-      if (includeAccountTab) 'Аккаунт',
-      ..._automationTabLabels,
-    ];
+    final labels = _labels;
+    final accountId = widget.accountId;
 
-    return DefaultTabController(
-      length: tabLabels.length,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (!includeAccountTab)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Text(
-                'Выберите аккаунт слева или на карте — настройки привяжутся к нему.',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (!_hasAccount)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Text(
+              'Выберите аккаунт слева или на карте — появятся вкладки Группы и Чаты.',
+              style: Theme.of(context).textTheme.bodySmall,
             ),
-          TabBar(
-            isScrollable: true,
-            tabAlignment: TabAlignment.start,
-            tabs: [for (final label in tabLabels) Tab(text: label)],
           ),
-          Expanded(
-            child: TabBarView(
-              children: [
-                if (includeAccountTab && accountId != null)
-                  AccountMapPanel(key: ValueKey(accountId), accountId: accountId!),
-                _AutoReplyTab(
-                  state: state,
-                  browser: browser,
-                  nameController: nameController,
-                  keywordsController: keywordsController,
-                  replyController: replyController,
-                  onAddRule: onAddRule,
-                ),
-                const AiChatPanel(),
-                const ScenarioPanel(),
-                const MotherPanel(),
-                const ChannelCatalogPanel(),
+        TabBar(
+          controller: _tabController,
+          isScrollable: true,
+          tabAlignment: TabAlignment.start,
+          tabs: [for (final label in labels) Tab(text: label)],
+        ),
+        Expanded(
+          child: TabBarView(
+            controller: _tabController,
+            children: [
+              if (_hasAccount && accountId != null) ...[
+                AccountMapPanel(key: ValueKey('acc-$accountId'), accountId: accountId),
+                WorkflowGroupsTab(key: ValueKey('grp-$accountId'), accountId: accountId),
+                AccountChatsTab(key: ValueKey('cht-$accountId'), accountId: accountId),
               ],
-            ),
+              _AutoReplyTab(
+                state: widget.state,
+                browser: browser,
+                nameController: widget.nameController,
+                keywordsController: widget.keywordsController,
+                replyController: widget.replyController,
+                onAddRule: widget.onAddRule,
+              ),
+              const AiChatPanel(),
+              const ScenarioPanel(),
+              const MotherPanel(),
+              const ChannelCatalogPanel(),
+            ],
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

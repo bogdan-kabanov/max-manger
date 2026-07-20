@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../../providers/app_state.dart';
 
+/// Slim account identity tab — no groups/chats clutter.
 class AccountMapPanel extends StatelessWidget {
   const AccountMapPanel({super.key, required this.accountId});
 
@@ -16,96 +17,94 @@ class AccountMapPanel extends StatelessWidget {
       return const Center(child: Text('Аккаунт не найден'));
     }
 
-    final groups = state.groupsForAccount(accountId);
     final theme = Theme.of(context);
+    final groups = state.groupsForAccount(accountId);
+    final totalChats = groups.fold<int>(
+      0,
+      (sum, g) => sum + (g.group?.targetChats.length ?? 0),
+    );
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
       children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(Icons.person_outline, color: theme.colorScheme.primary),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      account.label,
-                      style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
-                    ),
-                  ),
-                ],
+        Row(
+          children: [
+            Icon(Icons.person_outline, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                account.label,
+                style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
               ),
-              const SizedBox(height: 4),
-              Text(
-                account.hasApiSession ? 'Токен подключён' : 'Нет API-токена',
-                style: theme.textTheme.bodySmall,
-              ),
-              const SizedBox(height: 12),
-              Text(
-                'Аккаунт — точка входа. Создайте группу, чтобы настроить чаты и рассылки.',
-                style: theme.textTheme.bodySmall,
-              ),
-            ],
-          ),
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: FilledButton.icon(
-            onPressed: () async {
-              await state.addWorkflowGroupForAccount(accountId);
-            },
-            icon: const Icon(Icons.folder_outlined, size: 18),
-            label: const Text('Создать группу'),
-          ),
-        ),
-        const SizedBox(height: 8),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: OutlinedButton.icon(
-            onPressed: () => state.setBrowserDrawerOpen(true),
-            icon: const Icon(Icons.open_in_new, size: 18),
-            label: const Text('Открыть MAX'),
-          ),
-        ),
-        const SizedBox(height: 12),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Text('Группы (${groups.length})', style: theme.textTheme.titleSmall),
+            ),
+          ],
         ),
         const SizedBox(height: 4),
-        Expanded(
-          child: groups.isEmpty
-              ? const Center(
-                  child: Padding(
-                    padding: EdgeInsets.all(16),
-                    child: Text('Нет групп. Создайте первую — она появится на карте и свяжется с аккаунтом.'),
-                  ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  itemCount: groups.length,
-                  itemBuilder: (context, index) {
-                    final group = groups[index];
-                    final chatCount = group.group?.targetChats.length ?? 0;
-                    final broadcastCount = state.broadcastsInGroup(group.id).length;
-                    return Card(
-                      margin: const EdgeInsets.only(bottom: 8),
-                      child: ListTile(
-                        leading: const Icon(Icons.folder_outlined),
-                        title: Text(group.title),
-                        subtitle: Text('$chatCount чатов · $broadcastCount рассылок'),
-                        trailing: const Icon(Icons.chevron_right),
-                        onTap: () => state.selectWorkflowNode(group.id),
-                      ),
-                    );
-                  },
-                ),
+        Text(
+          account.hasApiSession ? 'Токен подключён' : 'Нет API-токена',
+          style: theme.textTheme.bodySmall,
+        ),
+        if (account.viewerId != null) ...[
+          const SizedBox(height: 2),
+          Text('viewerId ${account.viewerId}', style: theme.textTheme.bodySmall),
+        ],
+        if (account.phone?.trim().isNotEmpty == true) ...[
+          const SizedBox(height: 2),
+          Text(account.phone!.trim(), style: theme.textTheme.bodySmall),
+        ],
+        const SizedBox(height: 16),
+        Text(
+          'Группы и чаты — на соседних вкладках. Здесь только сам аккаунт.',
+          style: theme.textTheme.bodySmall,
+        ),
+        const SizedBox(height: 16),
+        OutlinedButton.icon(
+          onPressed: () => state.setBrowserDrawerOpen(true),
+          icon: const Icon(Icons.open_in_new, size: 18),
+          label: const Text('Открыть MAX'),
+        ),
+        const SizedBox(height: 20),
+        Text('Кратко', style: theme.textTheme.titleSmall),
+        const SizedBox(height: 8),
+        _StatTile(
+          icon: Icons.folder_outlined,
+          label: 'Групп на карте',
+          value: '${groups.length}',
+        ),
+        _StatTile(
+          icon: Icons.chat_bubble_outline,
+          label: 'Чатов в группах',
+          value: '$totalChats',
+        ),
+        _StatTile(
+          icon: Icons.vpn_key_outlined,
+          label: 'Прокси',
+          value: (account.isolation.proxyServer?.trim().isNotEmpty == true) ? 'есть' : 'нет',
         ),
       ],
+    );
+  }
+}
+
+class _StatTile extends StatelessWidget {
+  const _StatTile({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(icon, size: 20),
+      title: Text(label, style: const TextStyle(fontSize: 13)),
+      trailing: Text(value, style: const TextStyle(fontWeight: FontWeight.w600)),
     );
   }
 }

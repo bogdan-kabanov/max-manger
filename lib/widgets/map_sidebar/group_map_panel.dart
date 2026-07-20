@@ -6,9 +6,16 @@ import '../../providers/app_state.dart';
 import 'map_chat_checkbox_list.dart';
 
 class GroupMapPanel extends StatefulWidget {
-  const GroupMapPanel({super.key, required this.node});
+  const GroupMapPanel({
+    super.key,
+    required this.node,
+    this.includeChats = true,
+    this.onBack,
+  });
 
   final MapWorkflowNode node;
+  final bool includeChats;
+  final VoidCallback? onBack;
 
   @override
   State<GroupMapPanel> createState() => _GroupMapPanelState();
@@ -24,7 +31,9 @@ class _GroupMapPanelState extends State<GroupMapPanel> {
     super.initState();
     _title = TextEditingController(text: widget.node.title);
     _selectedChats = {...?widget.node.group?.targetChats};
-    WidgetsBinding.instance.addPostFrameCallback((_) => _autoLoadCatalogIfNeeded());
+    if (widget.includeChats) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _autoLoadCatalogIfNeeded());
+    }
   }
 
   void _autoLoadCatalogIfNeeded() {
@@ -83,7 +92,9 @@ class _GroupMapPanelState extends State<GroupMapPanel> {
   }
 
   Future<void> _save(AppState state) async {
-    final chats = _selectedChats.toList()..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+    final chats = widget.includeChats
+        ? (_selectedChats.toList()..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase())))
+        : (widget.node.group?.targetChats ?? const <String>[]);
     await state.updateWorkflowNode(
       widget.node.copyWith(
         title: _title.text.trim().isEmpty ? widget.node.title : _title.text.trim(),
@@ -105,13 +116,26 @@ class _GroupMapPanelState extends State<GroupMapPanel> {
     final owner = ownerId != null ? state.accountById(ownerId) : null;
     final broadcasts = state.broadcastsInGroup(widget.node.id);
     final availableChats = ownerId != null ? state.availableChatsForAccount(ownerId) : const <String>[];
+    final chatCount = widget.node.group?.targetChats.length ?? 0;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (widget.onBack != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: widget.onBack,
+                icon: const Icon(Icons.arrow_back, size: 18),
+                label: const Text('К списку групп'),
+              ),
+            ),
+          ),
         Expanded(
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
             children: [
               Row(
                 children: [
@@ -147,45 +171,58 @@ class _GroupMapPanelState extends State<GroupMapPanel> {
                   border: OutlineInputBorder(),
                 ),
               ),
-              const SizedBox(height: 16),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Группы MAX',
-                      style: theme.textTheme.titleSmall,
+              if (!widget.includeChats) ...[
+                const SizedBox(height: 12),
+                Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.chat_bubble_outline),
+                    title: Text('Чаты: $chatCount'),
+                    subtitle: const Text('Выбор чатов — на вкладке «Чаты»'),
+                    dense: true,
+                  ),
+                ),
+              ],
+              if (widget.includeChats) ...[
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Группы MAX',
+                        style: theme.textTheme.titleSmall,
+                      ),
                     ),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: _loadingCatalog || ownerId == null ? null : () => _refreshCatalog(state),
-                    icon: _loadingCatalog
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.refresh, size: 18),
-                    label: const Text('Загрузить'),
-                    style: FilledButton.styleFrom(visualDensity: VisualDensity.compact),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              Text(
-                'Отметьте чекбоксами, в каких группах работает бот. Список подгружается из MAX аккаунта.',
-                style: theme.textTheme.bodySmall,
-              ),
-              const SizedBox(height: 8),
-              MapChatCheckboxList(
-                availableChats: availableChats,
-                selectedChats: _selectedChats,
-                onChanged: (next) => setState(() => _selectedChats = next),
-                emptyHint: ownerId == null
-                    ? 'Привяжите карточку к аккаунту, затем нажмите «Загрузить».'
-                    : owner?.hasApiSession != true
-                        ? 'У аккаунта нет токена — добавьте API-сессию.'
-                        : 'Нажмите «Загрузить», чтобы получить группы из MAX.',
-              ),
+                    FilledButton.tonalIcon(
+                      onPressed: _loadingCatalog || ownerId == null ? null : () => _refreshCatalog(state),
+                      icon: _loadingCatalog
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.refresh, size: 18),
+                      label: const Text('Загрузить'),
+                      style: FilledButton.styleFrom(visualDensity: VisualDensity.compact),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Отметьте чекбоксами, в каких группах работает бот. Список подгружается из MAX аккаунта.',
+                  style: theme.textTheme.bodySmall,
+                ),
+                const SizedBox(height: 8),
+                MapChatCheckboxList(
+                  availableChats: availableChats,
+                  selectedChats: _selectedChats,
+                  onChanged: (next) => setState(() => _selectedChats = next),
+                  emptyHint: ownerId == null
+                      ? 'Привяжите карточку к аккаунту, затем нажмите «Загрузить».'
+                      : owner?.hasApiSession != true
+                          ? 'У аккаунта нет токена — добавьте API-сессию.'
+                          : 'Нажмите «Загрузить», чтобы получить группы из MAX.',
+                ),
+              ],
               const SizedBox(height: 12),
               Row(
                 children: [
