@@ -8,6 +8,7 @@ import '../models/mother_group_channel.dart';
 import '../providers/app_state.dart';
 import '../services/browser_session_manager.dart';
 import '../services/max_mother_service.dart';
+import '../services/mother_invite_planner.dart';
 import '../services/storage_service.dart';
 import '../utils/join_link_parser.dart';
 
@@ -25,6 +26,7 @@ class MotherPanel extends StatefulWidget {
 
 class _MotherPanelState extends State<MotherPanel> {
   final _linksController = TextEditingController();
+  String? _activeClusterId;
   String? _motherId;
   final _childIds = <String>{};
   bool _running = false;
@@ -35,6 +37,8 @@ class _MotherPanelState extends State<MotherPanel> {
   List<MotherGroupChannel> _motherGroups = const [];
   final _selectedGroupIds = <String>{};
   String? _groupsLoadedForMotherId;
+  MotherInvitePlan? _massPlan;
+  bool _massLoading = false;
 
   @override
   void initState() {
@@ -57,11 +61,351 @@ class _MotherPanelState extends State<MotherPanel> {
     _emitMapActivity(msg);
   }
 
+  void _applyCluster(MotherCluster? cluster) {
+    _activeClusterId = cluster?.id;
+    _motherId = cluster?.motherAccountId;
+    _childIds
+      ..clear()
+      ..addAll(cluster?.childAccountIds ?? const {});
+    _groupsLoadedForMotherId = null;
+  }
+
+  void _ensureActiveCluster(AppState state) {
+    final clusters = state.motherClusters;
+    if (clusters.isEmpty) {
+      if (_activeClusterId != null || _motherId != null || _childIds.isNotEmpty) {
+        _applyCluster(null);
+      }
+      return;
+    }
+    final active = state.accountMap.clusterById(_activeClusterId ?? '');
+    if (active == null) {
+      _applyCluster(clusters.first);
+      return;
+    }
+    // Keep local edits while editing; only resync mother/children if cluster id matches
+    // but local ids drifted from deleted accounts.
+    final accountIds = state.accounts.map((a) => a.id).toSet();
+    if (_motherId != null && !accountIds.contains(_motherId)) {
+      _motherId = active.motherAccountId;
+    }
+    _childIds.removeWhere((id) => !accountIds.contains(id) || id == _motherId);
+  }
+
   void _syncMapRelations() {
-    context.read<AppState>().setMotherRelations(
+    final clusterId = _activeClusterId;
+    if (clusterId == null) return;
+    context.read<AppState>().setMotherClusterRelations(
+          clusterId: clusterId,
           motherId: _motherId,
           childIds: _childIds,
+          clearMother: _motherId == null,
         );
+  }
+
+  Future<void> _addCluster() async {
+    final state = context.read<AppState>();
+    final cluster = await state.addMotherCluster();
+    if (!mounted) return;
+    setState(() => _applyCluster(cluster));
+    _log('Создана «${cluster.name}»');
+  }
+
+  Future<void> _deleteActiveCluster() async {
+    final clusterId = _activeClusterId;
+    if (clusterId == null) return;
+    final state = context.read<AppState>();
+    final cluster = state.accountMap.clusterById(clusterId);
+    final name = cluster?.name ?? 'Матка';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Удалить матку?'),
+        content: Text('«$name» будет удалена. Аккаунты останутся, связи сбросятся.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Удалить')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await state.removeMotherCluster(clusterId);
+    if (!mounted) return;
+    setState(() {
+      final next = state.motherClusters.isNotEmpty ? state.motherClusters.first : null;
+      _applyCluster(next);
+    });
+    _log('Удалена «$name»');
+  }
+
+  Future<void> _renameActiveCluster() async {
+    final clusterId = _activeClusterId;
+    if (clusterId == null) return;
+    final state = context.read<AppState>();
+    final cluster = state.accountMap.clusterById(clusterId);
+    if (cluster == null) return;
+    final controller = TextEditingController(text: cluster.name);
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Название матки'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Название',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('Сохранить'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (name == null || name.isEmpty || !mounted) return;
+    await state.updateMotherCluster(cluster.copyWith(name: name));
+  }
+
+  void _selectCluster(MotherCluster cluster) {
+    if (_activeClusterId == cluster.id) return;
+    setState(() => _applyCluster(cluster));
+  }
+
+  Map<String, List<MotherGroupChannel>> _groupsByMotherId(AppState state) {
+    final map = <String, List<MotherGroupChannel>>{};
+    for (final cluster in state.motherClusters) {
+      final motherId = cluster.motherAccountId;
+      if (motherId == null) continue;
+      map[motherId] = StorageService.instance.motherGroupsFor(motherId);
+    }
+    return map;
+  }
+
+  MotherInvitePlan _computeMassPlan(AppState state) {
+    return MotherInvitePlanner.build(
+      clusters: state.motherClusters,
+      accounts: state.accounts,
+      groupsByMotherId: _groupsByMotherId(state),
+    );
+  }
+
+  Future<void> _ensureUzbekViewerIds(AppState state, {int limit = 40}) async {
+    final motherIds = state.accountMap.allMotherAccountIds;
+    final uzb = state.accounts
+        .where((a) => !motherIds.contains(a.id) && a.isUzbek && a.hasApiSession && a.viewerId == null)
+        .take(limit)
+        .toList();
+    for (final account in uzb) {
+      await state.ensureViewerId(account);
+      _log('viewer id «${account.label}»…');
+    }
+  }
+
+  Future<void> _loadMotherGroupsCore(AppState state, List<MaxAccount> mothers) async {
+    for (var i = 0; i < mothers.length; i++) {
+      final mother = mothers[i];
+      _log('[${i + 1}/${mothers.length}] каналы «${mother.label}»…');
+      await state.ensureViewerId(mother);
+      final fresh = state.accountById(mother.id)!;
+      final result = await MaxMotherService.listMotherGroups(
+        token: fresh.apiToken!,
+        scanMessages: true,
+        proxy: fresh.isolation.proxyServer,
+        onProgress: _log,
+      );
+      if (!mounted) return;
+      if (result.ok) {
+        await _persistGroups(mother.id, result.groups);
+        _log('«${mother.label}»: ${result.groups.length} каналов');
+      } else {
+        _log('✗ «${mother.label}»: ${result.message}', level: 'warn');
+      }
+    }
+  }
+
+  Future<void> _loadAllMotherGroups() async {
+    final state = context.read<AppState>();
+    final mothers = <MaxAccount>[];
+    for (final cluster in state.motherClusters) {
+      final id = cluster.motherAccountId;
+      if (id == null) continue;
+      final mother = state.accountById(id);
+      if (mother != null && mother.hasApiSession) mothers.add(mother);
+    }
+    if (mothers.isEmpty) {
+      _log('Нет маток с токеном');
+      return;
+    }
+
+    setState(() {
+      _massLoading = true;
+      _loadingGroups = true;
+    });
+    _log('Загружаем каналы ${mothers.length} маток…');
+    try {
+      await _loadMotherGroupsCore(state, mothers);
+      await _ensureUzbekViewerIds(state);
+      if (!mounted) return;
+      setState(() {
+        _groupsLoadedForMotherId = null;
+        _massPlan = _computeMassPlan(state);
+      });
+      _log(_massPlan?.summaryLine ?? 'План пуст');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _massLoading = false;
+          _loadingGroups = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _applyPlanToClusters(AppState state, MotherInvitePlan plan) async {
+    for (final summary in plan.motherSummaries) {
+      await state.setMotherClusterRelations(
+        clusterId: summary.clusterId,
+        motherId: summary.mother.id,
+        childIds: summary.children.map((c) => c.id).toSet(),
+      );
+    }
+  }
+
+  Future<void> _runMassProportionalInvite() async {
+    final state = context.read<AppState>();
+    if (_running || _massLoading) return;
+
+    setState(() {
+      _running = true;
+      _massLoading = true;
+    });
+    try {
+      final mothersNeedingGroups = <MaxAccount>[];
+      for (final cluster in state.motherClusters) {
+        final id = cluster.motherAccountId;
+        if (id == null) continue;
+        final mother = state.accountById(id);
+        if (mother == null || !mother.hasApiSession) continue;
+        if (StorageService.instance.motherGroupsFor(id).isEmpty) {
+          mothersNeedingGroups.add(mother);
+        }
+      }
+      if (mothersNeedingGroups.isNotEmpty) {
+        _log('Сначала подгружаем каналы ${mothersNeedingGroups.length} маток…');
+        await _loadMotherGroupsCore(state, mothersNeedingGroups);
+      }
+      await _ensureUzbekViewerIds(state);
+      if (!mounted) return;
+
+      final plan = _computeMassPlan(state);
+      setState(() {
+        _massPlan = plan;
+        _groupsLoadedForMotherId = null;
+      });
+      if (!plan.ok) {
+        _failPrepare(plan.error ?? 'Нечего запускать');
+        return;
+      }
+
+      _log(plan.summaryLine);
+      for (final s in plan.motherSummaries) {
+        _log(
+          '«${s.clusterName}» / ${s.mother.label}: ${s.accountCount} узб → '
+          '${s.groupCount} групп (${s.inviteCount} приглаш.)',
+        );
+      }
+
+      await _applyPlanToClusters(state, plan);
+      if (_activeClusterId != null) {
+        final active = state.accountMap.clusterById(_activeClusterId!);
+        if (active != null) setState(() => _applyCluster(active));
+      }
+
+      final delayMs = int.tryParse(_delayController.text.trim()) ?? 2500;
+      final byMother = <String, List<MotherInviteSlot>>{};
+      for (final slot in plan.slots) {
+        byMother.putIfAbsent(slot.mother.id, () => []).add(slot);
+      }
+
+      var motherIndex = 0;
+      for (final entry in byMother.entries) {
+        motherIndex++;
+        final slots = entry.value;
+        final mother = slots.first.mother;
+        final fresh = state.accountById(mother.id) ?? mother;
+        if (!fresh.hasApiSession) {
+          _log('✗ Пропуск «${mother.label}»: нет токена', level: 'warn');
+          continue;
+        }
+
+        _log('[$motherIndex/${byMother.length}] матка «${fresh.label}»: ${slots.length} групп');
+        for (var i = 0; i < slots.length; i++) {
+          final slot = slots[i];
+          final inviteIds = <int>[];
+          for (final child in slot.children) {
+            final id = child.viewerId ?? state.accountById(child.id)?.viewerId;
+            if (id != null) inviteIds.add(id);
+          }
+          if (inviteIds.isEmpty) {
+            _log('  · «${slot.group.title}»: нет viewer id', level: 'warn');
+            continue;
+          }
+
+          _log(
+            '  · [${i + 1}/${slots.length}] «${slot.group.title}» ← ${inviteIds.length} узб',
+          );
+          final result = await MaxMotherService.inviteChildren(
+            motherToken: fresh.apiToken!,
+            links: const [],
+            chatIds: [slot.group.chatId],
+            groups: [
+              {
+                'chatId': slot.group.chatId,
+                'title': slot.group.title,
+                if (slot.group.inviteHash != null) 'hash': slot.group.inviteHash,
+              },
+            ],
+            inviteUserIds: inviteIds,
+            delayMs: delayMs,
+            proxy: fresh.isolation.proxyServer,
+            onProgress: _log,
+          );
+          if (result.ok) {
+            _log('    ✓ приглашено: ${result.invited}');
+          } else {
+            _log('    ✗ ${result.message}', level: 'warn');
+          }
+        }
+      }
+
+      _log(
+        'Готово: ${plan.uzbekAssigned} узб / ${plan.mothersReady} маток / '
+        '${plan.totalInvites} приглашений',
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Набор: ${plan.uzbekAssigned} узб → ${plan.mothersReady} маток '
+              '(${plan.totalInvites} приглаш.)',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _running = false;
+          _massLoading = false;
+        });
+      }
+    }
   }
 
   void _emitMapActivity(String msg) {
@@ -726,23 +1070,137 @@ class _MotherPanelState extends State<MotherPanel> {
 
   Future<void> _run() => _runMode(_MotherMode.full);
 
+  Widget _buildMassInviteCard(BuildContext context, AppState state) {
+    final plan = _massPlan ?? _computeMassPlan(state);
+    final theme = Theme.of(context);
+    final uzbekCount = state.accounts.where((a) => a.isUzbek && !state.isMotherAccount(a.id)).length;
+    final readyMothers = state.motherClusters.where((c) {
+      final id = c.motherAccountId;
+      if (id == null) return false;
+      final m = state.accountById(id);
+      return m != null && m.hasApiSession;
+    }).length;
+
+    return Card(
+      margin: EdgeInsets.zero,
+      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.55),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.auto_awesome_motion, size: 16),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Автонабор узб (≤${MotherInvitePlanner.defaultInvitesPerMother}/матка)',
+                    style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Маток с токеном: $readyMothers · Узб-акков: $uzbekCount · '
+              'Ёмкость: ${readyMothers * MotherInvitePlanner.defaultInvitesPerMother}',
+              style: theme.textTheme.bodySmall?.copyWith(fontSize: 10),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              plan.summaryLine,
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontSize: 10,
+                color: plan.ok ? Colors.lightGreenAccent : Colors.orangeAccent,
+              ),
+            ),
+            if (plan.motherSummaries.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              ...plan.motherSummaries.take(6).map(
+                    (s) => Text(
+                      '· ${s.clusterName}: ${s.accountCount} узб → ${s.groupCount} групп',
+                      style: theme.textTheme.bodySmall?.copyWith(fontSize: 10),
+                    ),
+                  ),
+              if (plan.motherSummaries.length > 6)
+                Text(
+                  '· …ещё ${plan.motherSummaries.length - 6}',
+                  style: theme.textTheme.bodySmall?.copyWith(fontSize: 10),
+                ),
+            ],
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _running || _massLoading ? null : _loadAllMotherGroups,
+                  icon: _massLoading && !_running
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.cloud_download, size: 16),
+                  label: const Text('Загрузить маток', style: TextStyle(fontSize: 11)),
+                ),
+                OutlinedButton.icon(
+                  onPressed: _running || _massLoading
+                      ? null
+                      : () {
+                          setState(() => _massPlan = _computeMassPlan(state));
+                          _log(_massPlan!.summaryLine);
+                        },
+                  icon: const Icon(Icons.calculate, size: 16),
+                  label: const Text('Пересчитать', style: TextStyle(fontSize: 11)),
+                ),
+                FilledButton.icon(
+                  onPressed: _running || _massLoading || !_cliReady
+                      ? null
+                      : _runMassProportionalInvite,
+                  icon: _running
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.group_add, size: 16),
+                  label: Text(
+                    _running ? 'Набор…' : 'Распределить и пригласить',
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Узб = +998 или «узб» в названии. Аккаунты делятся по маткам (макс. 100), '
+              'затем равномерно по группам каждой матки.',
+              style: theme.textTheme.bodySmall?.copyWith(fontSize: 9, color: theme.hintColor),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     final accounts = state.accounts;
-    final selected = state.selectedAccount;
+    final clusters = state.motherClusters;
 
-    if (_motherId == null || !accounts.any((a) => a.id == _motherId)) {
-      _motherId = state.motherAccountId ?? selected?.id ?? (accounts.isNotEmpty ? accounts.first.id : null);
-    }
-    if (_childIds.isEmpty && state.childAccountIds.isNotEmpty) {
-      _childIds.addAll(state.childAccountIds);
-    }
+    _ensureActiveCluster(state);
 
-    final otherAccounts = accounts.where((a) => a.id != _motherId).toList();
-    if (_childIds.isEmpty && otherAccounts.length == 1 && otherAccounts.first.hasApiSession) {
-      _childIds.add(otherAccounts.first.id);
-      WidgetsBinding.instance.addPostFrameCallback((_) => _syncMapRelations());
+    final occupiedElsewhere = state.accountMap.occupiedAccountIds(exceptClusterId: _activeClusterId);
+    final motherChoices = accounts.where((a) => !occupiedElsewhere.contains(a.id) || a.id == _motherId).toList();
+    final childChoices = accounts
+        .where((a) => a.id != _motherId && (!occupiedElsewhere.contains(a.id) || _childIds.contains(a.id)))
+        .toList();
+
+    if (_motherId != null && !accounts.any((a) => a.id == _motherId)) {
+      _motherId = null;
     }
 
     if (_motherId != _groupsLoadedForMotherId) {
@@ -761,6 +1219,7 @@ class _MotherPanelState extends State<MotherPanel> {
         .length;
     final targetCount = manualHashCount + selectedGroupLinkCount;
     final motherHasToken = mother?.hasApiSession == true;
+    final activeCluster = state.accountMap.clusterById(_activeClusterId ?? '');
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
@@ -776,21 +1235,107 @@ class _MotherPanelState extends State<MotherPanel> {
           ),
         if (!_cliReady) const SizedBox(height: 8),
         Text(
-          'Матка вступает в группы и добавляет выбранные аккаунты.',
+          'Несколько маток: у каждой свои дочерние аккаунты и каналы.',
           style: Theme.of(context).textTheme.bodySmall,
         ),
         const SizedBox(height: 10),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Матки (${clusters.length})',
+                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Переименовать',
+              onPressed: _running || activeCluster == null ? null : _renameActiveCluster,
+              icon: const Icon(Icons.edit, size: 18),
+              visualDensity: VisualDensity.compact,
+            ),
+            IconButton(
+              tooltip: 'Удалить матку',
+              onPressed: _running || activeCluster == null ? null : _deleteActiveCluster,
+              icon: const Icon(Icons.delete_outline, size: 18),
+              visualDensity: VisualDensity.compact,
+            ),
+            FilledButton.tonalIcon(
+              onPressed: _running ? null : _addCluster,
+              icon: const Icon(Icons.add, size: 16),
+              label: const Text('Добавить', style: TextStyle(fontSize: 11)),
+              style: FilledButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        if (clusters.isEmpty)
+          Card(
+            margin: EdgeInsets.zero,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'Пока нет маток. Создайте первую — затем привяжите аккаунт и дочерние.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 11),
+                  ),
+                  const SizedBox(height: 8),
+                  FilledButton.icon(
+                    onPressed: _running ? null : _addCluster,
+                    icon: const Icon(Icons.hive, size: 18),
+                    label: const Text('Создать матку'),
+                  ),
+                ],
+              ),
+            ),
+          )
+        else
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              for (final cluster in clusters)
+                ChoiceChip(
+                  selected: cluster.id == _activeClusterId,
+                  label: Text(
+                    '${cluster.name} · ${cluster.childCount}',
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  avatar: Icon(
+                    cluster.motherAccountId != null ? Icons.hive : Icons.hive_outlined,
+                    size: 14,
+                  ),
+                  onSelected: _running
+                      ? null
+                      : (_) => _selectCluster(cluster),
+                ),
+            ],
+          ),
+        if (clusters.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          _buildMassInviteCard(context, state),
+        ],
+        if (clusters.isEmpty) const SizedBox.shrink() else ...[
+        const SizedBox(height: 12),
         DropdownButtonFormField<String>(
+          key: ValueKey('mother-account-$_activeClusterId'),
           isExpanded: true,
-          initialValue: accounts.any((a) => a.id == _motherId) ? _motherId : null,
-          decoration: const InputDecoration(
-            labelText: 'Аккаунт-матка',
-            border: OutlineInputBorder(),
+          initialValue: motherChoices.any((a) => a.id == _motherId) ? _motherId : null,
+          decoration: InputDecoration(
+            labelText: 'Аккаунт-матка${activeCluster != null ? ' · ${activeCluster.name}' : ''}',
+            border: const OutlineInputBorder(),
             isDense: true,
-            contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            helperText: occupiedElsewhere.isEmpty
+                ? null
+                : 'Аккаунты других маток скрыты',
           ),
           items: [
-            for (final a in accounts)
+            for (final a in motherChoices)
               DropdownMenuItem(
                 value: a.id,
                 child: Row(
@@ -985,10 +1530,13 @@ class _MotherPanelState extends State<MotherPanel> {
         const SizedBox(height: 10),
         Row(
           children: [
-            const Expanded(
-              child: Text('Добавить в группы', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
+            Expanded(
+              child: Text(
+                'Дочерние (${_childIds.length})',
+                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+              ),
             ),
-            if (accounts.length > 2) ...[
+            if (childChoices.length > 1) ...[
               TextButton(
                 onPressed: _running
                     ? null
@@ -996,9 +1544,7 @@ class _MotherPanelState extends State<MotherPanel> {
                         setState(() {
                           _childIds
                             ..clear()
-                            ..addAll(
-                              accounts.where((a) => a.id != _motherId).map((a) => a.id),
-                            );
+                            ..addAll(childChoices.map((a) => a.id));
                         });
                         _syncMapRelations();
                       },
@@ -1018,11 +1564,19 @@ class _MotherPanelState extends State<MotherPanel> {
         ),
         SizedBox(
           height: 108,
-          child: accounts.length <= 1
-              ? const Center(child: Text('Добавьте ещё аккаунты', style: TextStyle(fontSize: 11)))
+          child: childChoices.isEmpty
+              ? Center(
+                  child: Text(
+                    accounts.length <= 1
+                        ? 'Добавьте ещё аккаунты'
+                        : 'Свободных аккаунтов нет — они заняты другими матками',
+                    style: const TextStyle(fontSize: 11),
+                    textAlign: TextAlign.center,
+                  ),
+                )
               : ListView(
                   children: [
-                    for (final a in accounts.where((a) => a.id != _motherId))
+                    for (final a in childChoices)
                       CheckboxListTile(
                         contentPadding: EdgeInsets.zero,
                         dense: true,
@@ -1094,7 +1648,7 @@ class _MotherPanelState extends State<MotherPanel> {
             ),
           ],
         ),
-        if (_childIds.isEmpty && otherAccounts.isNotEmpty)
+        if (_childIds.isEmpty && childChoices.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(bottom: 6),
             child: Text(
@@ -1163,6 +1717,7 @@ class _MotherPanelState extends State<MotherPanel> {
                   ),
             ),
           ),
+        ],
       ],
     );
   }

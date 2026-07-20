@@ -182,8 +182,8 @@ class _AccountMapCanvasState extends State<AccountMapCanvas> {
         return AccountNodeCard(
           account: account,
           selected: state.selectedAccount?.id == account.id && state.selectedWorkflowNodeId == null,
-          isMother: state.motherAccountId == account.id,
-          isChild: state.childAccountIds.contains(account.id),
+          isMother: state.isMotherAccount(account.id),
+          isChild: state.isChildAccount(account.id),
           activityLabel: _activityLabelFor(account.id, state),
           highlightLink: _linkMode && _linkSourceAccountId == account.id,
           onTap: () => _onNodeTap(state, node),

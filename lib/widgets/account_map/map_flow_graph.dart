@@ -57,7 +57,9 @@ class MapFlowGraphBuilder {
         .join(';');
     final accountEdges = state.accountMap.edges.map((e) => e.key).join(';');
     final workflowEdges = state.workflowEdges.map((e) => e.key).join(';');
-    final roles = '${state.motherAccountId}|${state.childAccountIds.join(',')}';
+    final roles = state.motherClusters
+        .map((c) => '${c.id}:${c.motherAccountId ?? ''}>${c.childAccountIds.join(',')}')
+        .join('|');
     return '$accounts|$workflows|$accountEdges|$workflowEdges|$roles';
   }
 

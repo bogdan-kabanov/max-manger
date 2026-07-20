@@ -35,6 +35,14 @@ class MaxAccount {
   bool get hasApiSession => apiToken != null && apiToken!.isNotEmpty;
   bool get hasEmulator => emulator.isConfigured;
 
+  /// Uzbek accounts: +998 phone, or «узб»/«uzb» in label/notes.
+  bool get isUzbek {
+    final digits = (phone ?? '').replaceAll(RegExp(r'\D'), '');
+    if (digits.startsWith('998') && digits.length >= 12) return true;
+    final text = '${label.toLowerCase()} ${(notes ?? '').toLowerCase()}';
+    return text.contains('узб') || text.contains('uzb') || text.contains('uzbek');
+  }
+
   String get webDeviceId =>
       isolation.deviceId ?? const Uuid().v5(Uuid.NAMESPACE_URL, 'max-desktop-device:$id');
 

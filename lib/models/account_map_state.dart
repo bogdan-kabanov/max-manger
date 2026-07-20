@@ -1,5 +1,7 @@
 import 'dart:ui';
 
+import 'package:uuid/uuid.dart';
+
 import 'map_workflow.dart';
 
 enum AccountMapEdgeType { motherChild, forwardLink, message }
@@ -91,26 +93,142 @@ class AccountMapActivity {
   bool get isRecent => DateTime.now().difference(at).inSeconds < 8;
 }
 
+/// One mother account with its own set of child accounts.
+class MotherCluster {
+  const MotherCluster({
+    required this.id,
+    required this.name,
+    this.motherAccountId,
+    this.childAccountIds = const {},
+  });
+
+  final String id;
+  final String name;
+  final String? motherAccountId;
+  final Set<String> childAccountIds;
+
+  int get childCount => childAccountIds.length;
+
+  MotherCluster copyWith({
+    String? name,
+    String? motherAccountId,
+    Set<String>? childAccountIds,
+    bool clearMother = false,
+  }) {
+    return MotherCluster(
+      id: id,
+      name: name ?? this.name,
+      motherAccountId: clearMother ? null : (motherAccountId ?? this.motherAccountId),
+      childAccountIds: childAccountIds ?? this.childAccountIds,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        if (motherAccountId != null) 'motherAccountId': motherAccountId,
+        'childAccountIds': childAccountIds.toList(),
+      };
+
+  factory MotherCluster.fromJson(Map<String, dynamic> json) {
+    return MotherCluster(
+      id: (json['id'] as String?) ?? const Uuid().v4(),
+      name: (json['name'] as String?)?.trim().isNotEmpty == true
+          ? (json['name'] as String).trim()
+          : 'Матка',
+      motherAccountId: json['motherAccountId'] as String?,
+      childAccountIds: (json['childAccountIds'] as List<dynamic>? ?? [])
+          .map((e) => e.toString())
+          .toSet(),
+    );
+  }
+
+  static MotherCluster create({String? name, String? motherAccountId, Set<String>? childAccountIds}) {
+    return MotherCluster(
+      id: const Uuid().v4(),
+      name: name ?? 'Матка',
+      motherAccountId: motherAccountId,
+      childAccountIds: childAccountIds ?? const {},
+    );
+  }
+}
+
 class AccountMapState {
   const AccountMapState({
     this.positions = const [],
     this.edges = const [],
-    this.motherAccountId,
-    this.childAccountIds = const {},
+    this.motherClusters = const [],
     this.workflowNodes = const [],
     this.workflowEdges = const [],
   });
 
   final List<AccountNodePosition> positions;
   final List<AccountMapEdge> edges;
-  final String? motherAccountId;
-  final Set<String> childAccountIds;
+  final List<MotherCluster> motherClusters;
   final List<MapWorkflowNode> workflowNodes;
   final List<WorkflowMapEdge> workflowEdges;
+
+  /// Legacy / convenience: first cluster's mother (or null).
+  String? get motherAccountId =>
+      motherClusters.isEmpty ? null : motherClusters.first.motherAccountId;
+
+  /// Legacy / convenience: union of all child ids across clusters.
+  Set<String> get childAccountIds => {
+        for (final c in motherClusters) ...c.childAccountIds,
+      };
+
+  Set<String> get allMotherAccountIds => {
+        for (final c in motherClusters)
+          if (c.motherAccountId != null) c.motherAccountId!,
+      };
+
+  bool isMotherAccount(String accountId) => allMotherAccountIds.contains(accountId);
+
+  bool isChildAccount(String accountId) => childAccountIds.contains(accountId);
+
+  MotherCluster? clusterById(String id) {
+    for (final c in motherClusters) {
+      if (c.id == id) return c;
+    }
+    return null;
+  }
+
+  MotherCluster? clusterForMother(String motherAccountId) {
+    for (final c in motherClusters) {
+      if (c.motherAccountId == motherAccountId) return c;
+    }
+    return null;
+  }
+
+  /// Account ids already used as mother or child in other clusters.
+  Set<String> occupiedAccountIds({String? exceptClusterId}) {
+    final occupied = <String>{};
+    for (final c in motherClusters) {
+      if (exceptClusterId != null && c.id == exceptClusterId) continue;
+      if (c.motherAccountId != null) occupied.add(c.motherAccountId!);
+      occupied.addAll(c.childAccountIds);
+    }
+    return occupied;
+  }
+
+  List<AccountMapEdge> edgesFromClusters() {
+    final edges = <AccountMapEdge>[];
+    for (final c in motherClusters) {
+      final motherId = c.motherAccountId;
+      if (motherId == null) continue;
+      for (final childId in c.childAccountIds) {
+        if (childId == motherId) continue;
+        edges.add(AccountMapEdge(fromAccountId: motherId, toAccountId: childId));
+      }
+    }
+    return edges;
+  }
 
   Map<String, dynamic> toJson() => {
         'positions': positions.map((p) => p.toJson()).toList(),
         'edges': edges.map((e) => e.toJson()).toList(),
+        'motherClusters': motherClusters.map((c) => c.toJson()).toList(),
+        // Keep legacy fields for older builds reading the same file.
         if (motherAccountId != null) 'motherAccountId': motherAccountId,
         'childAccountIds': childAccountIds.toList(),
         'workflowNodes': workflowNodes.map((n) => n.toJson()).toList(),
@@ -119,17 +237,41 @@ class AccountMapState {
 
   factory AccountMapState.fromJson(Map<String, dynamic>? json) {
     if (json == null) return const AccountMapState();
-    return AccountMapState(
+
+    final rawClusters = json['motherClusters'] as List<dynamic>?;
+    var clusters = (rawClusters ?? [])
+        .whereType<Map<String, dynamic>>()
+        .map(MotherCluster.fromJson)
+        .toList();
+
+    // Migrate legacy single-mother fields.
+    if (clusters.isEmpty) {
+      final legacyMother = json['motherAccountId'] as String?;
+      final legacyChildren = (json['childAccountIds'] as List<dynamic>? ?? [])
+          .map((e) => e.toString())
+          .toSet();
+      if (legacyMother != null || legacyChildren.isNotEmpty) {
+        clusters = [
+          MotherCluster(
+            id: const Uuid().v4(),
+            name: 'Матка 1',
+            motherAccountId: legacyMother,
+            childAccountIds: legacyChildren,
+          ),
+        ];
+      }
+    }
+
+    final loadedEdges = (json['edges'] as List<dynamic>? ?? [])
+        .map((e) => AccountMapEdge.fromJson(e as Map<String, dynamic>))
+        .toList();
+
+    final state = AccountMapState(
       positions: (json['positions'] as List<dynamic>? ?? [])
           .map((e) => AccountNodePosition.fromJson(e as Map<String, dynamic>))
           .toList(),
-      edges: (json['edges'] as List<dynamic>? ?? [])
-          .map((e) => AccountMapEdge.fromJson(e as Map<String, dynamic>))
-          .toList(),
-      motherAccountId: json['motherAccountId'] as String?,
-      childAccountIds: (json['childAccountIds'] as List<dynamic>? ?? [])
-          .map((e) => e.toString())
-          .toSet(),
+      edges: loadedEdges,
+      motherClusters: clusters,
       workflowNodes: (json['workflowNodes'] as List<dynamic>? ?? [])
           .map((e) => MapWorkflowNode.fromJson(e as Map<String, dynamic>))
           .toList(),
@@ -137,21 +279,25 @@ class AccountMapState {
           .map((e) => WorkflowMapEdge.fromJson(e as Map<String, dynamic>))
           .toList(),
     );
+
+    // Prefer edges rebuilt from clusters when clusters exist.
+    if (clusters.isNotEmpty) {
+      return state.copyWith(edges: state.edgesFromClusters());
+    }
+    return state;
   }
 
   AccountMapState copyWith({
     List<AccountNodePosition>? positions,
     List<AccountMapEdge>? edges,
-    String? motherAccountId,
-    Set<String>? childAccountIds,
+    List<MotherCluster>? motherClusters,
     List<MapWorkflowNode>? workflowNodes,
     List<WorkflowMapEdge>? workflowEdges,
   }) {
     return AccountMapState(
       positions: positions ?? this.positions,
       edges: edges ?? this.edges,
-      motherAccountId: motherAccountId ?? this.motherAccountId,
-      childAccountIds: childAccountIds ?? this.childAccountIds,
+      motherClusters: motherClusters ?? this.motherClusters,
       workflowNodes: workflowNodes ?? this.workflowNodes,
       workflowEdges: workflowEdges ?? this.workflowEdges,
     );

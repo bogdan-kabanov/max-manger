@@ -55,8 +55,11 @@ class AppState extends ChangeNotifier {
   Timer? _mapActivityTimer;
 
   AccountMapState get accountMap => storage.accountMap;
+  List<MotherCluster> get motherClusters => accountMap.motherClusters;
   String? get motherAccountId => accountMap.motherAccountId;
   Set<String> get childAccountIds => accountMap.childAccountIds;
+  bool isMotherAccount(String accountId) => accountMap.isMotherAccount(accountId);
+  bool isChildAccount(String accountId) => accountMap.isChildAccount(accountId);
   List<MapWorkflowNode> get workflowNodes => accountMap.workflowNodes;
   List<WorkflowMapEdge> get workflowEdges => accountMap.workflowEdges;
 
@@ -371,22 +374,115 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> setMotherRelations({String? motherId, Set<String>? childIds}) async {
-    final edges = <AccountMapEdge>[];
-    final children = childIds ?? accountMap.childAccountIds;
-    if (motherId != null) {
-      for (final childId in children) {
-        if (childId != motherId) {
-          edges.add(AccountMapEdge(fromAccountId: motherId, toAccountId: childId));
-        }
-      }
-    }
-    final updated = accountMap.copyWith(
-      edges: edges,
-      motherAccountId: motherId,
-      childAccountIds: children,
+  Future<void> _persistMotherClusters(List<MotherCluster> clusters) async {
+    final cleaned = clusters
+        .map(
+          (c) => c.copyWith(
+            childAccountIds: {
+              for (final id in c.childAccountIds)
+                if (id != c.motherAccountId) id,
+            },
+          ),
+        )
+        .toList();
+    final withEdges = accountMap.copyWith(
+      motherClusters: cleaned,
+      edges: AccountMapState(motherClusters: cleaned).edgesFromClusters(),
     );
-    await _persistAccountMap(updated);
+    await _persistAccountMap(withEdges);
+  }
+
+  Future<MotherCluster> addMotherCluster({String? name, String? motherAccountId}) async {
+    final index = accountMap.motherClusters.length + 1;
+    final cluster = MotherCluster.create(
+      name: name ?? 'Матка $index',
+      motherAccountId: motherAccountId,
+    );
+    await _persistMotherClusters([...accountMap.motherClusters, cluster]);
+    return cluster;
+  }
+
+  Future<void> updateMotherCluster(MotherCluster cluster) async {
+    final list = accountMap.motherClusters.map((c) => c.id == cluster.id ? cluster : c).toList();
+    if (!list.any((c) => c.id == cluster.id)) {
+      list.add(cluster);
+    }
+    await _persistMotherClusters(list);
+  }
+
+  Future<void> removeMotherCluster(String clusterId) async {
+    await _persistMotherClusters(
+      accountMap.motherClusters.where((c) => c.id != clusterId).toList(),
+    );
+  }
+
+  /// Updates one cluster's mother/children without touching other clusters.
+  Future<void> setMotherClusterRelations({
+    required String clusterId,
+    String? motherId,
+    Set<String>? childIds,
+    bool clearMother = false,
+  }) async {
+    final existing = accountMap.clusterById(clusterId);
+    if (existing == null) return;
+    final occupied = accountMap.occupiedAccountIds(exceptClusterId: clusterId);
+    final nextMother = clearMother ? null : (motherId ?? existing.motherAccountId);
+    if (nextMother != null && occupied.contains(nextMother)) {
+      return;
+    }
+    final requestedChildren = childIds ?? existing.childAccountIds;
+    final nextChildren = {
+      for (final id in requestedChildren)
+        if (id != nextMother && !occupied.contains(id)) id,
+    };
+    await updateMotherCluster(
+      existing.copyWith(
+        motherAccountId: nextMother,
+        childAccountIds: nextChildren,
+        clearMother: clearMother,
+      ),
+    );
+  }
+
+  /// Legacy helper — updates the first cluster (creates one if needed).
+  Future<void> setMotherRelations({String? motherId, Set<String>? childIds}) async {
+    if (accountMap.motherClusters.isEmpty) {
+      await addMotherCluster(motherAccountId: motherId);
+      if (childIds != null && accountMap.motherClusters.isNotEmpty) {
+        await setMotherClusterRelations(
+          clusterId: accountMap.motherClusters.first.id,
+          motherId: motherId,
+          childIds: childIds,
+        );
+      }
+      return;
+    }
+    await setMotherClusterRelations(
+      clusterId: accountMap.motherClusters.first.id,
+      motherId: motherId,
+      childIds: childIds,
+      clearMother: motherId == null,
+    );
+  }
+
+  Future<void> pruneMotherClustersForRemovedAccount(String accountId) async {
+    final next = <MotherCluster>[];
+    var changed = false;
+    for (final c in accountMap.motherClusters) {
+      var cluster = c;
+      if (c.motherAccountId == accountId) {
+        cluster = c.copyWith(clearMother: true, childAccountIds: c.childAccountIds);
+        changed = true;
+      }
+      if (c.childAccountIds.contains(accountId)) {
+        cluster = cluster.copyWith(
+          childAccountIds: {...cluster.childAccountIds}..remove(accountId),
+        );
+        changed = true;
+      }
+      next.add(cluster);
+    }
+    if (changed) await _persistMotherClusters(next);
   }
 
   Offset positionForAccount(String accountId) {
@@ -818,6 +914,7 @@ class AppState extends ChangeNotifier {
       _scheduler.stopAll();
       await browser.close();
     }
+    await pruneMotherClustersForRemovedAccount(account.id);
     await storage.removeAccount(account.id);
     if (selectedAccount?.id == account.id) {
       selectedAccount = accounts.isNotEmpty ? accounts.first : null;
