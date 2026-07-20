@@ -1,10 +1,10 @@
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../providers/app_state.dart';
+import '../services/desktop_file_picker.dart';
 import '../services/max_auth_service.dart';
 import '../services/token_file_parser.dart';
 
@@ -48,25 +48,19 @@ class _BulkTokenImportDialogState extends State<BulkTokenImportDialog> {
       _status = null;
     });
 
-    final result = await FilePicker.platform.pickFiles(
-      allowMultiple: true,
-      type: FileType.custom,
-      allowedExtensions: const ['txt', 'log', 'js', 'json', 'text'],
-      withData: false,
-    );
-    if (result == null || result.files.isEmpty) return;
+    List<String> paths;
+    try {
+      paths = await DesktopFilePicker.pickTextFiles();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'Не удалось открыть диалог выбора: $e');
+      return;
+    }
+    if (paths.isEmpty) return;
 
     final parsed = <_ImportRow>[];
-    for (final file in result.files) {
-      final path = file.path;
-      final name = file.name;
-      if (path == null) {
-        parsed.add(_ImportRow(
-          sourceName: name,
-          snippet: const ParsedAuthSnippet(error: 'Не удалось прочитать путь файла'),
-        ));
-        continue;
-      }
+    for (final path in paths) {
+      final name = path.split(RegExp(r'[\\/]')).last;
       try {
         final content = await File(path).readAsString();
         parsed.add(_ImportRow(
@@ -260,7 +254,7 @@ class _BulkTokenImportDialogState extends State<BulkTokenImportDialog> {
                     )
                   : ListView.separated(
                       itemCount: _rows.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      separatorBuilder: (_, _) => const Divider(height: 1),
                       itemBuilder: (context, index) {
                         final row = _rows[index];
                         final ok = row.snippet.ok;
@@ -329,8 +323,7 @@ class _ImportRow {
   _ImportRow({
     required this.sourceName,
     required this.snippet,
-    this.selected = true,
-  });
+  }) : selected = snippet.ok;
 
   final String sourceName;
   final ParsedAuthSnippet snippet;
