@@ -226,16 +226,9 @@ class _ChatsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
-    final account = state.selectedAccount;
-    if (account == null) {
-      return const _EmptyHint(
-        icon: Icons.chat_bubble_outline,
-        text: 'Выберите аккаунт на вкладке «Профили»,\nзатем откройте «Чаты».',
-      );
-    }
     return AccountChatsTab(
-      key: ValueKey('nav-chats-${account.id}'),
-      accountId: account.id,
+      key: ValueKey('nav-chats-${state.selectedAccount?.id ?? 'all'}'),
+      focusAccountId: state.selectedAccount?.id,
     );
   }
 }

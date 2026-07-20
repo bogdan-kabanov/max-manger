@@ -12,6 +12,7 @@ import '../models/emulator_profile.dart';
 import '../models/macro_scenario.dart';
 import '../models/macro_step.dart';
 import '../models/max_account.dart';
+import '../models/mother_group_channel.dart';
 import '../services/browser_session_manager.dart';
 import '../services/ai_chat_service.dart';
 import '../services/emulator_macro_runner.dart';
@@ -138,14 +139,43 @@ class AppState extends ChangeNotifier {
     return workflowNodes.where((n) => n.isBroadcast && n.parentGroupId == groupId).toList();
   }
 
+  /// Mother account whose MAX groups should be used for [accountId]
+  /// (the account itself if it is a mother / not in a cluster).
+  String chatCatalogAccountId(String accountId) {
+    if (accountMap.isMotherAccount(accountId)) return accountId;
+    for (final c in motherClusters) {
+      if (c.childAccountIds.contains(accountId) && c.motherAccountId != null) {
+        return c.motherAccountId!;
+      }
+    }
+    return accountId;
+  }
+
+  MotherCluster? clusterContainingAccount(String accountId) {
+    for (final c in motherClusters) {
+      if (c.motherAccountId == accountId || c.childAccountIds.contains(accountId)) {
+        return c;
+      }
+    }
+    return null;
+  }
+
+  /// Rich channel list for the account's mother catalog (never mixes mothers).
+  List<MotherGroupChannel> motherChannelsForAccount(String accountId) {
+    final catalogId = chatCatalogAccountId(accountId);
+    return List<MotherGroupChannel>.from(storage.motherGroupsFor(catalogId));
+  }
+
   /// Чаты/группы MAX, доступные для выбора у аккаунта (из кэша матки + WS).
   List<String> availableChatsForAccount(String accountId) {
+    final catalogId = chatCatalogAccountId(accountId);
     final names = <String>{};
-    for (final group in storage.motherGroupsFor(accountId)) {
+    for (final group in storage.motherGroupsFor(catalogId)) {
       final title = group.title.trim();
       if (title.isNotEmpty) names.add(title);
     }
-    if (selectedAccount?.id == accountId && maxWs.isConnected) {
+    // Live WS titles only when connected as this mother — avoid mixing other sessions.
+    if (selectedAccount?.id == catalogId && maxWs.isConnected) {
       for (final title in maxWs.chatTitles.values) {
         final t = title.trim();
         if (t.isNotEmpty) names.add(t);
@@ -154,13 +184,18 @@ class AppState extends ChangeNotifier {
     return names.toList()..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
   }
 
-  /// Загружает список групп/чатов аккаунта из MAX API.
+  /// Загружает список групп/чатов матки (для дочернего — каталог её матки).
   Future<void> refreshAccountChatCatalog(String accountId) async {
-    final account = accountById(accountId);
+    final catalogId = chatCatalogAccountId(accountId);
+    final account = accountById(catalogId);
     if (account == null || !account.hasApiSession) {
-      throw StateError('У аккаунта нет API-токена');
+      throw StateError(
+        catalogId != accountId
+            ? 'У матки нет API-токена — загрузите чаты через аккаунт матки'
+            : 'У аккаунта нет API-токена',
+      );
     }
-    browser.logMessage('Загрузка групп MAX для «${account.label}»…');
+    browser.logMessage('Загрузка групп MAX для матки «${account.label}»…');
     final result = await MaxMotherService.listMotherGroups(
       token: account.apiToken!,
       scanMessages: false,
@@ -170,10 +205,10 @@ class AppState extends ChangeNotifier {
     if (!result.ok) {
       throw StateError(result.message);
     }
-    await storage.mergeMotherGroups(accountId, result.groups);
-    browser.logMessage('Групп в каталоге: ${result.groups.length}');
+    await storage.mergeMotherGroups(catalogId, result.groups);
+    browser.logMessage('Групп в каталоге матки «${account.label}»: ${result.groups.length}');
 
-    if (selectedAccount?.id == accountId) {
+    if (selectedAccount?.id == catalogId) {
       try {
         await maxWs.connect(
           token: account.apiToken!,
