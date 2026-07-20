@@ -2,14 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/automation_rule.dart';
-import '../models/map_workflow.dart';
 import '../providers/app_state.dart';
 import '../services/browser_session_manager.dart';
 import 'ai_chat_panel.dart';
-import 'map_sidebar/account_chats_tab.dart';
-import 'map_sidebar/account_map_panel.dart';
 import 'map_sidebar/map_log_panel.dart';
-import 'map_sidebar/workflow_groups_tab.dart';
 import 'channel_catalog_panel.dart';
 import 'mother_panel.dart';
 import 'scenario_panel.dart';
@@ -50,19 +46,12 @@ class _AutomationPanelState extends State<AutomationPanel> {
     _replyController.clear();
   }
 
-  String _headerTitle(AppState state) {
-    if (state.selectedAccount != null) return 'Аккаунт';
-    return 'Автоматизация';
-  }
-
-  String? _headerSubtitle(AppState state) => state.selectedAccount?.label;
-
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
 
     return Container(
-      width: widget.fullWidth ? double.infinity : 420,
+      width: widget.fullWidth ? double.infinity : 380,
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerHigh,
         border: Border(left: BorderSide(color: Theme.of(context).dividerColor)),
@@ -75,10 +64,13 @@ class _AutomationPanelState extends State<AutomationPanel> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(_headerTitle(state), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-                if (_headerSubtitle(state) != null) ...[
+                const Text('Автоматизация', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                if (state.selectedAccount != null) ...[
                   const SizedBox(height: 4),
-                  Text(_headerSubtitle(state)!, style: Theme.of(context).textTheme.bodySmall),
+                  Text(
+                    state.selectedAccount!.label,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
                 ],
               ],
             ),
@@ -87,7 +79,6 @@ class _AutomationPanelState extends State<AutomationPanel> {
           Expanded(
             child: _AutomationTabs(
               key: ValueKey(state.selectedAccount?.id ?? 'global'),
-              accountId: state.selectedAccount?.id,
               state: state,
               nameController: _nameController,
               keywordsController: _keywordsController,
@@ -102,7 +93,7 @@ class _AutomationPanelState extends State<AutomationPanel> {
   }
 }
 
-class _AutomationTabs extends StatefulWidget {
+class _AutomationTabs extends StatelessWidget {
   const _AutomationTabs({
     super.key,
     required this.state,
@@ -110,28 +101,15 @@ class _AutomationTabs extends StatefulWidget {
     required this.keywordsController,
     required this.replyController,
     required this.onAddRule,
-    this.accountId,
   });
 
-  final String? accountId;
   final AppState state;
   final TextEditingController nameController;
   final TextEditingController keywordsController;
   final TextEditingController replyController;
   final VoidCallback onAddRule;
 
-  @override
-  State<_AutomationTabs> createState() => _AutomationTabsState();
-}
-
-class _AutomationTabsState extends State<_AutomationTabs> with SingleTickerProviderStateMixin {
-  late TabController _tabController;
-  String? _lastAutoJumpNodeId;
-
-  bool get _hasAccount => widget.accountId != null;
-
-  List<String> get _labels => [
-    if (_hasAccount) ...['Аккаунт', 'Группы', 'Чаты'],
+  static const _labels = [
     'Автоответы',
     'ИИ-бот',
     'Сценарии',
@@ -139,104 +117,55 @@ class _AutomationTabsState extends State<_AutomationTabs> with SingleTickerProvi
     'Каналы',
   ];
 
-  int get _groupsTabIndex => _hasAccount ? 1 : -1;
-
-  @override
-  void initState() {
-    super.initState();
-    _tabController = TabController(length: _labels.length, vsync: this);
-    _maybeJumpToGroups(widget.state);
-  }
-
-  @override
-  void didUpdateWidget(covariant _AutomationTabs oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.accountId != widget.accountId ||
-        oldWidget.state.selectedWorkflowNodeId != widget.state.selectedWorkflowNodeId) {
-      final labels = _labels;
-      if (_tabController.length != labels.length) {
-        final oldIndex = _tabController.index;
-        _tabController.dispose();
-        _tabController = TabController(
-          length: labels.length,
-          vsync: this,
-          initialIndex: oldIndex.clamp(0, labels.length - 1),
-        );
-      }
-      _maybeJumpToGroups(widget.state);
-    }
-  }
-
-  void _maybeJumpToGroups(AppState state) {
-    if (!_hasAccount || _groupsTabIndex < 0) return;
-    final nodeId = state.selectedWorkflowNodeId;
-    if (nodeId == null || nodeId == _lastAutoJumpNodeId) return;
-    final node = state.workflowNodes.byId(nodeId);
-    if (node == null) return;
-    if (!node.isGroup && !node.isBroadcast) return;
-    _lastAutoJumpNodeId = nodeId;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      if (_tabController.index != _groupsTabIndex) {
-        _tabController.animateTo(_groupsTabIndex);
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
-  }
-
   @override
   Widget build(BuildContext context) {
     final browser = context.watch<BrowserSessionManager>();
-    final labels = _labels;
-    final accountId = widget.accountId;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (!_hasAccount)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Text(
-              'Выберите аккаунт слева или на карте — появятся вкладки Группы и Чаты.',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ),
-        TabBar(
-          controller: _tabController,
-          isScrollable: true,
-          tabAlignment: TabAlignment.start,
-          tabs: [for (final label in labels) Tab(text: label)],
-        ),
-        Expanded(
-          child: TabBarView(
-            controller: _tabController,
-            children: [
-              if (_hasAccount && accountId != null) ...[
-                AccountMapPanel(key: ValueKey('acc-$accountId'), accountId: accountId),
-                WorkflowGroupsTab(key: ValueKey('grp-$accountId'), accountId: accountId),
-                AccountChatsTab(key: ValueKey('cht-$accountId'), accountId: accountId),
-              ],
-              _AutoReplyTab(
-                state: widget.state,
-                browser: browser,
-                nameController: widget.nameController,
-                keywordsController: widget.keywordsController,
-                replyController: widget.replyController,
-                onAddRule: widget.onAddRule,
+    return DefaultTabController(
+      length: _labels.length,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (state.selectedAccount == null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text(
+                'Выберите аккаунт слева — правила и бот привяжутся к нему. '
+                'Группы и чаты — отдельные страницы в меню слева.',
+                style: Theme.of(context).textTheme.bodySmall,
               ),
-              const AiChatPanel(),
-              const ScenarioPanel(),
-              const MotherPanel(),
-              const ChannelCatalogPanel(),
+            ),
+          const TabBar(
+            isScrollable: true,
+            tabAlignment: TabAlignment.start,
+            tabs: [
+              Tab(text: 'Автоответы'),
+              Tab(text: 'ИИ-бот'),
+              Tab(text: 'Сценарии'),
+              Tab(text: 'Матка'),
+              Tab(text: 'Каналы'),
             ],
           ),
-        ),
-      ],
+          Expanded(
+            child: TabBarView(
+              children: [
+                _AutoReplyTab(
+                  state: state,
+                  browser: browser,
+                  nameController: nameController,
+                  keywordsController: keywordsController,
+                  replyController: replyController,
+                  onAddRule: onAddRule,
+                ),
+                const AiChatPanel(),
+                const ScenarioPanel(),
+                const MotherPanel(),
+                const ChannelCatalogPanel(),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

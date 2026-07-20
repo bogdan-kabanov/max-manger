@@ -3,18 +3,21 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../models/app_nav_page.dart';
 import '../models/max_account.dart';
 import '../providers/app_state.dart';
 import '../services/max_auth_service.dart';
 import '../services/proxy_support.dart';
 import '../services/window_launcher.dart';
+import 'bulk_token_import_dialog.dart';
 import 'emulator_panel_dialog.dart';
+import 'map_sidebar/account_chats_tab.dart';
+import 'map_sidebar/workflow_groups_tab.dart';
 import 'registration_guide_dialog.dart';
 import 'sms_account_dialog.dart';
-import 'bulk_token_import_dialog.dart';
 import 'token_account_dialog.dart';
 
-enum AppNavPage { profiles, addAccount, emulator, help, about }
+export '../models/app_nav_page.dart';
 
 /// Adaptive left navigation: slim rail + dedicated pages (no cramped sidebar).
 class AppNavShell extends StatefulWidget {
@@ -40,21 +43,24 @@ class AppNavShell extends StatefulWidget {
 }
 
 class _AppNavShellState extends State<AppNavShell> {
-  AppNavPage _page = AppNavPage.profiles;
-
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final state = context.watch<AppState>();
+    final page = state.navPage;
 
     return LayoutBuilder(
       builder: (context, constraints) {
         final totalWidth = constraints.maxWidth.isFinite
             ? constraints.maxWidth
             : MediaQuery.sizeOf(context).width;
-        // Prefer a readable content column; shrink only when the window is tight.
-        final contentWidth = totalWidth < 1100
-            ? 260.0
-            : (totalWidth < 1400 ? 300.0 : 340.0);
+        // Groups/Chats need a wider work column than Profiles.
+        final wideWorkPage = page == AppNavPage.groups || page == AppNavPage.chats;
+        final contentWidth = wideWorkPage
+            ? (totalWidth < 1200 ? 360.0 : 420.0)
+            : (totalWidth < 1100
+                ? 260.0
+                : (totalWidth < 1400 ? 300.0 : 340.0));
         final extended = totalWidth >= 1500;
 
         return Container(
@@ -69,8 +75,9 @@ class _AppNavShellState extends State<AppNavShell> {
                 extended: extended,
                 minWidth: 64,
                 minExtendedWidth: 148,
-                selectedIndex: _page.index,
-                onDestinationSelected: (i) => setState(() => _page = AppNavPage.values[i]),
+                selectedIndex: page.index,
+                onDestinationSelected: (i) =>
+                    context.read<AppState>().setNavPage(AppNavPage.values[i]),
                 labelType: extended ? NavigationRailLabelType.none : NavigationRailLabelType.all,
                 backgroundColor: scheme.surfaceContainerHighest.withValues(alpha: 0.35),
                 leading: Padding(
@@ -87,6 +94,16 @@ class _AppNavShellState extends State<AppNavShell> {
                     icon: Icon(Icons.person_add_alt_outlined),
                     selectedIcon: Icon(Icons.person_add_alt_1),
                     label: Text('Вход'),
+                  ),
+                  NavigationRailDestination(
+                    icon: Icon(Icons.folder_outlined),
+                    selectedIcon: Icon(Icons.folder),
+                    label: Text('Группы'),
+                  ),
+                  NavigationRailDestination(
+                    icon: Icon(Icons.chat_bubble_outline),
+                    selectedIcon: Icon(Icons.chat_bubble),
+                    label: Text('Чаты'),
                   ),
                   NavigationRailDestination(
                     icon: Icon(Icons.phone_android_outlined),
@@ -113,12 +130,14 @@ class _AppNavShellState extends State<AppNavShell> {
                   switchInCurve: Curves.easeOut,
                   switchOutCurve: Curves.easeIn,
                   child: KeyedSubtree(
-                    key: ValueKey(_page),
-                    child: switch (_page) {
+                    key: ValueKey(page),
+                    child: switch (page) {
                       AppNavPage.profiles => const _ProfilesPage(),
                       AppNavPage.addAccount => _AddAccountPage(
-                          onCreated: () => setState(() => _page = AppNavPage.profiles),
+                          onCreated: () => context.read<AppState>().setNavPage(AppNavPage.profiles),
                         ),
+                      AppNavPage.groups => const _GroupsPage(),
+                      AppNavPage.chats => const _ChatsPage(),
                       AppNavPage.emulator => const _EmulatorPage(),
                       AppNavPage.help => const _HelpPage(),
                       AppNavPage.about => _AboutPage(
@@ -180,6 +199,46 @@ class _BrandMark extends StatelessWidget {
 }
 
 // ─── Profiles ───────────────────────────────────────────────────────────────
+
+class _GroupsPage extends StatelessWidget {
+  const _GroupsPage();
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final account = state.selectedAccount;
+    if (account == null) {
+      return const _EmptyHint(
+        icon: Icons.folder_outlined,
+        text: 'Выберите аккаунт на вкладке «Профили»,\nзатем откройте «Группы».',
+      );
+    }
+    return WorkflowGroupsTab(
+      key: ValueKey('nav-groups-${account.id}'),
+      accountId: account.id,
+    );
+  }
+}
+
+class _ChatsPage extends StatelessWidget {
+  const _ChatsPage();
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final account = state.selectedAccount;
+    if (account == null) {
+      return const _EmptyHint(
+        icon: Icons.chat_bubble_outline,
+        text: 'Выберите аккаунт на вкладке «Профили»,\nзатем откройте «Чаты».',
+      );
+    }
+    return AccountChatsTab(
+      key: ValueKey('nav-chats-${account.id}'),
+      accountId: account.id,
+    );
+  }
+}
 
 class _ProfilesPage extends StatelessWidget {
   const _ProfilesPage();

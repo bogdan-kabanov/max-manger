@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import '../models/account_map_state.dart';
 import '../models/account_isolation.dart';
 import '../models/ai_chat_config.dart';
+import '../models/app_nav_page.dart';
 import '../models/automation_rule.dart';
 import '../models/emulator_profile.dart';
 import '../models/macro_scenario.dart';
@@ -41,6 +42,7 @@ class AppState extends ChangeNotifier {
 
   MaxAccount? selectedAccount;
   String? selectedWorkflowNodeId;
+  AppNavPage navPage = AppNavPage.profiles;
   bool automationEnabled = true;
   MacroScenario? editingScenario;
   bool emulatorPanelVisible = true;
@@ -78,6 +80,12 @@ class AppState extends ChangeNotifier {
     );
   }
 
+  void setNavPage(AppNavPage page) {
+    if (navPage == page) return;
+    navPage = page;
+    notifyListeners();
+  }
+
   void selectWorkflowNode(String? nodeId) {
     selectedWorkflowNodeId = nodeId;
     if (nodeId != null) {
@@ -92,6 +100,7 @@ class AppState extends ChangeNotifier {
             }
           }
         }
+        navPage = AppNavPage.groups;
       } else if (node?.isBroadcast == true && node!.parentGroupId != null) {
         final ownerId = ownerAccountIdForGroup(node.parentGroupId!);
         if (ownerId != null && selectedAccount?.id != ownerId) {
@@ -102,6 +111,7 @@ class AppState extends ChangeNotifier {
             }
           }
         }
+        navPage = AppNavPage.groups;
       }
     }
     notifyListeners();
