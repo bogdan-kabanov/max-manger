@@ -893,6 +893,35 @@ class AppState extends ChangeNotifier {
     return result.profileId;
   }
 
+  /// Pull name / phone / viewerId from MAX API for an existing account.
+  Future<MaxAuthResult> refreshAccountProfile(MaxAccount account) async {
+    if (!account.hasApiSession) {
+      return MaxAuthResult(ok: false, error: 'Нет токена сессии');
+    }
+
+    final result = await MaxAuthService.verifyToken(
+      account.apiToken!,
+      proxy: account.isolation.proxyServer,
+    );
+    if (!result.ok) return result;
+
+    final label = (result.profileName != null && result.profileName!.trim().isNotEmpty)
+        ? result.profileName!.trim()
+        : account.label;
+    final updated = account.copyWith(
+      label: label,
+      viewerId: result.profileId ?? account.viewerId,
+      phone: result.profilePhone ?? result.phone ?? account.phone,
+      authMethod: MaxAuthMethod.token,
+    );
+    await storage.updateAccount(updated);
+    if (selectedAccount?.id == account.id) {
+      selectedAccount = updated;
+    }
+    notifyListeners();
+    return result;
+  }
+
   List<MaxAccount> accountsWithToken() =>
       accounts.where((a) => a.hasApiSession).toList();
 

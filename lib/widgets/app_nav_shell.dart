@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/max_account.dart';
 import '../providers/app_state.dart';
+import '../services/max_auth_service.dart';
+import '../services/proxy_support.dart';
 import '../services/window_launcher.dart';
 import 'emulator_panel_dialog.dart';
 import 'registration_guide_dialog.dart';
@@ -314,11 +317,15 @@ class _ProfileCard extends StatelessWidget {
 
   static String _accountSubtitle(MaxAccount account) {
     final parts = <String>[];
-    if (account.lastOpenedAt != null) {
-      parts.add('Открыт ${_formatDate(account.lastOpenedAt!)}');
+    if (account.phone != null && account.phone!.trim().isNotEmpty) {
+      parts.add(account.phone!.trim());
     }
-    if (account.hasApiSession && account.phone != null) {
-      parts.add('SMS ${account.phone}');
+    if (account.viewerId != null) {
+      parts.add('id ${account.viewerId}');
+    }
+    parts.add(_authMethodLabel(account.authMethod));
+    if (account.lastOpenedAt != null) {
+      parts.add('открыт ${_formatDate(account.lastOpenedAt!)}');
     }
     if (account.hasEmulator) {
       parts.add('AVD ${account.emulator.avdName}');
@@ -326,16 +333,80 @@ class _ProfileCard extends StatelessWidget {
     if (parts.isEmpty) return 'Изолированный профиль';
     return parts.join(' · ');
   }
+
+  static String _authMethodLabel(MaxAuthMethod method) {
+    return switch (method) {
+      MaxAuthMethod.qr => 'QR',
+      MaxAuthMethod.sms => 'SMS',
+      MaxAuthMethod.token => 'токен',
+    };
+  }
 }
 
-class _SelectedAccountActions extends StatelessWidget {
+class _SelectedAccountActions extends StatefulWidget {
   const _SelectedAccountActions({required this.account});
 
   final MaxAccount account;
 
   @override
+  State<_SelectedAccountActions> createState() => _SelectedAccountActionsState();
+}
+
+class _SelectedAccountActionsState extends State<_SelectedAccountActions> {
+  bool _refreshing = false;
+
+  MaxAccount get account => widget.account;
+
+  Future<void> _refreshProfile() async {
+    setState(() => _refreshing = true);
+    final result = await context.read<AppState>().refreshAccountProfile(account);
+    if (!mounted) return;
+    setState(() => _refreshing = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.ok
+              ? 'Инфо обновлено'
+                  '${result.profileName != null ? ': ${result.profileName}' : ''}'
+                  '${result.profilePhone != null ? ' · ${result.profilePhone}' : ''}'
+              : (result.error ?? 'Не удалось обновить инфо'),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _copy(String label, String value) async {
+    await Clipboard.setData(ClipboardData(text: value));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('$label скопирован'), duration: const Duration(seconds: 2)),
+    );
+  }
+
+  String _proxyLabel() {
+    final raw = account.isolation.proxyServer?.trim();
+    if (raw == null || raw.isEmpty) return 'нет';
+    return ParsedProxy.tryParse(raw)?.masked ?? raw;
+  }
+
+  String _authLabel() {
+    return switch (account.authMethod) {
+      MaxAuthMethod.qr => 'QR',
+      MaxAuthMethod.sms => 'SMS',
+      MaxAuthMethod.token => 'токен',
+    };
+  }
+
+  static String _fmt(DateTime date) {
+    return '${date.day.toString().padLeft(2, '0')}.${date.month.toString().padLeft(2, '0')}.${date.year} '
+        '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+  }
+
+  @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final token = account.apiToken;
+    final proxyRaw = account.isolation.proxyServer?.trim();
 
     return Container(
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
@@ -346,13 +417,86 @@ class _SelectedAccountActions extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Text(
-            account.label,
-            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  account.label,
+                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (account.hasApiSession)
+                TextButton.icon(
+                  onPressed: _refreshing ? null : _refreshProfile,
+                  icon: _refreshing
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.sync, size: 16),
+                  label: const Text('Инфо', style: TextStyle(fontSize: 12)),
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                  ),
+                ),
+            ],
           ),
           const SizedBox(height: 8),
+          _InfoGrid(
+            rows: [
+              _InfoRow(
+                label: 'viewerId',
+                value: account.viewerId?.toString() ?? '—',
+                onCopy: account.viewerId != null
+                    ? () => _copy('viewerId', '${account.viewerId}')
+                    : null,
+              ),
+              _InfoRow(
+                label: 'телефон',
+                value: (account.phone?.trim().isNotEmpty == true) ? account.phone!.trim() : '—',
+                onCopy: account.phone?.trim().isNotEmpty == true
+                    ? () => _copy('Телефон', account.phone!.trim())
+                    : null,
+              ),
+              _InfoRow(label: 'вход', value: _authLabel()),
+              _InfoRow(
+                label: 'токен',
+                value: token != null && token.isNotEmpty
+                    ? MaxAuthService.tokenPreview(token)
+                    : 'нет',
+                onCopy: token != null && token.isNotEmpty
+                    ? () => _copy('Токен', token)
+                    : null,
+              ),
+              _InfoRow(
+                label: 'прокси',
+                value: _proxyLabel(),
+                onCopy: proxyRaw != null && proxyRaw.isNotEmpty
+                    ? () => _copy('Прокси', proxyRaw)
+                    : null,
+              ),
+              _InfoRow(
+                label: 'deviceId',
+                value: account.webDeviceId,
+                onCopy: () => _copy('deviceId', account.webDeviceId),
+              ),
+              _InfoRow(label: 'создан', value: _fmt(account.createdAt)),
+              _InfoRow(
+                label: 'открыт',
+                value: account.lastOpenedAt != null ? _fmt(account.lastOpenedAt!) : '—',
+              ),
+              if (account.isUzbek) const _InfoRow(label: 'регион', value: 'UZ (+998 / метка)'),
+              if (account.hasEmulator)
+                _InfoRow(label: 'AVD', value: account.emulator.avdName ?? '—'),
+              if (account.notes?.trim().isNotEmpty == true)
+                _InfoRow(label: 'заметки', value: account.notes!.trim()),
+            ],
+          ),
+          const SizedBox(height: 10),
           Wrap(
             spacing: 6,
             runSpacing: 6,
@@ -391,6 +535,67 @@ class _SelectedAccountActions extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _InfoGrid extends StatelessWidget {
+  const _InfoGrid({required this.rows});
+
+  final List<_InfoRow> rows;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        for (final row in rows) ...[
+          row,
+          if (row != rows.last) const SizedBox(height: 3),
+        ],
+      ],
+    );
+  }
+}
+
+class _InfoRow extends StatelessWidget {
+  const _InfoRow({
+    required this.label,
+    required this.value,
+    this.onCopy,
+  });
+
+  final String label;
+  final String value;
+  final VoidCallback? onCopy;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 72,
+          child: Text(
+            label,
+            style: const TextStyle(fontSize: 11, color: Colors.white54),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(fontSize: 11, fontFamily: 'Consolas', height: 1.25),
+          ),
+        ),
+        if (onCopy != null)
+          InkWell(
+            onTap: onCopy,
+            borderRadius: BorderRadius.circular(4),
+            child: const Padding(
+              padding: EdgeInsets.all(2),
+              child: Icon(Icons.copy, size: 13, color: Colors.white54),
+            ),
+          ),
+      ],
     );
   }
 }
