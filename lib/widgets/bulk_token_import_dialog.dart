@@ -70,7 +70,7 @@ class _BulkTokenImportDialogState extends State<BulkTokenImportDialog> {
       } catch (e) {
         parsed.add(_ImportRow(
           sourceName: name,
-          snippet: ParsedAuthSnippet(error: 'Ошибка чтения: $e'),
+          snippet: ParsedAuthSnippet(error: _readErrorMessage(path, e)),
         ));
       }
     }
@@ -80,6 +80,17 @@ class _BulkTokenImportDialogState extends State<BulkTokenImportDialog> {
         ..clear()
         ..addAll(parsed);
     });
+  }
+
+  String _readErrorMessage(String path, Object error) {
+    final text = error.toString();
+    if (text.contains('errno = 123') || text.contains('?????')) {
+      return 'Не удалось прочитать файл (битый путь). Переложите .txt в папку без кириллицы, например Desktop\\tokens\\, и выберите снова.';
+    }
+    if (text.contains('PathNotFoundException') || text.contains('Cannot open file')) {
+      return 'Файл не найден: $path';
+    }
+    return 'Ошибка чтения: $error';
   }
 
   String _labelFor(_ImportRow row, int index) {
