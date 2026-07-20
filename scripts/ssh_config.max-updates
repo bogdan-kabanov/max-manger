@@ -1,0 +1,11 @@
+# SSH helper for MAX Desktop update server (no passwords in repo).
+# Usage:
+#   ssh -F scripts/ssh_config.max-updates max-updates
+#   scp -F scripts/ssh_config.max-updates file max-updates:/var/www/max-desktop/
+
+Host max-updates
+  HostName 145.63.130.142
+  User root
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  ServerAliveInterval 30
