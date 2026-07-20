@@ -18,6 +18,7 @@ class AppNavShell extends StatefulWidget {
   const AppNavShell({
     super.key,
     this.onCheckUpdates,
+    this.onInstallUpdate,
     this.checkingUpdates = false,
     this.updateAvailable = false,
     this.localVersionLabel = '',
@@ -25,6 +26,7 @@ class AppNavShell extends StatefulWidget {
   });
 
   final VoidCallback? onCheckUpdates;
+  final VoidCallback? onInstallUpdate;
   final bool checkingUpdates;
   final bool updateAvailable;
   final String localVersionLabel;
@@ -118,6 +120,7 @@ class _AppNavShellState extends State<AppNavShell> {
                       AppNavPage.help => const _HelpPage(),
                       AppNavPage.about => _AboutPage(
                           onCheckUpdates: widget.onCheckUpdates,
+                          onInstallUpdate: widget.onInstallUpdate,
                           checkingUpdates: widget.checkingUpdates,
                           updateAvailable: widget.updateAvailable,
                           localVersionLabel: widget.localVersionLabel,
@@ -784,6 +787,7 @@ class _HelpStep extends StatelessWidget {
 class _AboutPage extends StatelessWidget {
   const _AboutPage({
     this.onCheckUpdates,
+    this.onInstallUpdate,
     this.checkingUpdates = false,
     this.updateAvailable = false,
     this.localVersionLabel = '',
@@ -791,6 +795,7 @@ class _AboutPage extends StatelessWidget {
   });
 
   final VoidCallback? onCheckUpdates;
+  final VoidCallback? onInstallUpdate;
   final bool checkingUpdates;
   final bool updateAvailable;
   final String localVersionLabel;
@@ -798,6 +803,10 @@ class _AboutPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final primaryAction = updateAvailable && onInstallUpdate != null
+        ? onInstallUpdate
+        : onCheckUpdates;
+
     return ListView(
       padding: const EdgeInsets.only(bottom: 16),
       children: [
@@ -818,7 +827,7 @@ class _AboutPage extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               FilledButton.tonalIcon(
-                onPressed: checkingUpdates || onCheckUpdates == null ? null : onCheckUpdates,
+                onPressed: checkingUpdates || primaryAction == null ? null : primaryAction,
                 icon: checkingUpdates
                     ? const SizedBox(
                         width: 16,
@@ -826,8 +835,15 @@ class _AboutPage extends StatelessWidget {
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : Icon(updateAvailable ? Icons.system_update : Icons.refresh, size: 18),
-                label: Text(updateAvailable ? 'Есть обновление' : 'Проверить обновления'),
+                label: Text(updateAvailable ? 'Установить обновление' : 'Проверить обновления'),
               ),
+              if (updateAvailable && onCheckUpdates != null) ...[
+                const SizedBox(height: 8),
+                TextButton(
+                  onPressed: checkingUpdates ? null : onCheckUpdates,
+                  child: const Text('Проверить ещё раз'),
+                ),
+              ],
             ],
           ),
         ),

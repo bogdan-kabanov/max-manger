@@ -51,8 +51,8 @@ class _HubScreenState extends State<HubScreen> {
             ? (silent ? null : 'У вас актуальная версия')
             : 'Доступна ${update.version}+${update.build}';
       });
-      if (update != null && silent) {
-        // On launch: show dialog once when update exists.
+      if (update != null) {
+        // Always offer install — silent launch and manual «Проверить обновления».
         await _promptUpdate(update);
       }
     } catch (e) {
@@ -177,6 +177,7 @@ class _HubScreenState extends State<HubScreen> {
               children: [
                 AppNavShell(
                   onCheckUpdates: () => _checkUpdates(silent: false),
+                  onInstallUpdate: update == null ? null : () => _promptUpdate(update),
                   checkingUpdates: _checkingUpdate,
                   updateAvailable: update != null,
                   localVersionLabel: _localVersionLabel,
