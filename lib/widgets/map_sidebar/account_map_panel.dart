@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../models/max_account.dart';
 import '../../providers/app_state.dart';
 
 /// Slim account identity tab — no groups/chats clutter.
@@ -41,9 +42,30 @@ class AccountMapPanel extends StatelessWidget {
         ),
         const SizedBox(height: 4),
         Text(
+          account.healthStatus.longLabel,
+          style: theme.textTheme.bodySmall?.copyWith(
+            color: switch (account.healthStatus) {
+              AccountHealthStatus.ok => Colors.lightGreenAccent,
+              AccountHealthStatus.banned => Colors.redAccent,
+              AccountHealthStatus.authFailed => Colors.orangeAccent,
+              AccountHealthStatus.networkError => Colors.blueGrey.shade200,
+              AccountHealthStatus.unknown => null,
+            },
+          ),
+        ),
+        Text(
           account.hasApiSession ? 'Токен подключён' : 'Нет API-токена',
           style: theme.textTheme.bodySmall,
         ),
+        if (account.lastError != null && account.healthStatus.isProblem) ...[
+          const SizedBox(height: 2),
+          Text(
+            account.lastError!,
+            style: theme.textTheme.bodySmall?.copyWith(color: Colors.orangeAccent),
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
         if (account.viewerId != null) ...[
           const SizedBox(height: 2),
           Text('viewerId ${account.viewerId}', style: theme.textTheme.bodySmall),

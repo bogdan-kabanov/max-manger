@@ -77,6 +77,16 @@ class AccountNodeCard extends StatelessWidget {
                 runSpacing: 4,
                 children: [
                   _Badge(
+                    label: account.healthStatus.shortLabel,
+                    color: switch (account.healthStatus) {
+                      AccountHealthStatus.ok => Colors.green,
+                      AccountHealthStatus.banned => Colors.redAccent,
+                      AccountHealthStatus.authFailed => Colors.orangeAccent,
+                      AccountHealthStatus.networkError => Colors.blueGrey,
+                      AccountHealthStatus.unknown => theme.colorScheme.outline,
+                    },
+                  ),
+                  _Badge(
                     label: account.hasApiSession ? 'токен ✓' : 'нет токена',
                     color: account.hasApiSession ? Colors.green : Colors.orangeAccent,
                   ),

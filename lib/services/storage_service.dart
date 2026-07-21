@@ -165,6 +165,8 @@ class StorageService {
     int? viewerId,
     String? proxyServer,
     String? deviceId,
+    AccountHealthStatus healthStatus = AccountHealthStatus.unknown,
+    String? lastError,
   }) async {
     final id = DateTime.now().microsecondsSinceEpoch.toString();
     var isolation = ProfileFingerprint.generate(id);
@@ -176,6 +178,7 @@ class StorageService {
     if (device != null && device.isNotEmpty) {
       isolation = isolation.copyWith(deviceId: device);
     }
+    final checked = healthStatus != AccountHealthStatus.unknown;
     final account = MaxAccount(
       id: id,
       label: label?.trim().isNotEmpty == true ? label!.trim() : (phone ?? 'Аккаунт'),
@@ -185,6 +188,9 @@ class StorageService {
       apiToken: apiToken,
       viewerId: viewerId,
       authMethod: MaxAuthMethod.token,
+      healthStatus: healthStatus,
+      lastError: lastError,
+      lastCheckedAt: checked ? DateTime.now() : null,
     );
     accounts.add(account);
     await profileDirFor(account.id).create(recursive: true);

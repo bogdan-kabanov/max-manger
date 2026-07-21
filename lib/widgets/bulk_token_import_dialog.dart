@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../models/max_account.dart';
 import '../providers/app_state.dart';
 import '../services/desktop_file_picker.dart';
 import '../services/max_auth_service.dart';
@@ -121,7 +122,14 @@ class _BulkTokenImportDialogState extends State<BulkTokenImportDialog> {
         .where((t) => t.isNotEmpty)
         .toSet();
 
-    final toCreate = <({String apiToken, String? label, int? viewerId, String? deviceId})>[];
+    final toCreate = <
+        ({
+          String apiToken,
+          String? label,
+          int? viewerId,
+          String? deviceId,
+          AccountHealthStatus healthStatus,
+        })>[];
     var skippedDup = 0;
     var failedVerify = 0;
 
@@ -136,22 +144,40 @@ class _BulkTokenImportDialogState extends State<BulkTokenImportDialog> {
       if (_verify) {
         setState(() => _status = 'Проверка ${i + 1}/${okRows.length}: ${row.sourceName}');
         final result = await MaxAuthService.verifyToken(token, proxy: _proxy);
-        if (!result.ok && !MaxAuthService.isNetworkError(result.error)) {
+        if (result.ok) {
+          toCreate.add((
+            apiToken: token,
+            label: result.profileName ?? _labelFor(row, i),
+            viewerId: row.snippet.viewerId ?? result.profileId,
+            deviceId: row.snippet.deviceId,
+            healthStatus: AccountHealthStatus.ok,
+          ));
+        } else if (MaxAuthService.isNetworkError(result.error)) {
+          toCreate.add((
+            apiToken: token,
+            label: _labelFor(row, i),
+            viewerId: row.snippet.viewerId,
+            deviceId: row.snippet.deviceId,
+            healthStatus: AccountHealthStatus.networkError,
+          ));
+        } else if (result.healthStatus == AccountHealthStatus.banned) {
+          toCreate.add((
+            apiToken: token,
+            label: result.profileName ?? _labelFor(row, i),
+            viewerId: row.snippet.viewerId ?? result.profileId,
+            deviceId: row.snippet.deviceId,
+            healthStatus: AccountHealthStatus.banned,
+          ));
+        } else {
           failedVerify++;
-          continue;
         }
-        toCreate.add((
-          apiToken: token,
-          label: result.profileName ?? _labelFor(row, i),
-          viewerId: row.snippet.viewerId ?? result.profileId,
-          deviceId: row.snippet.deviceId,
-        ));
       } else {
         toCreate.add((
           apiToken: token,
           label: _labelFor(row, i),
           viewerId: row.snippet.viewerId,
           deviceId: row.snippet.deviceId,
+          healthStatus: AccountHealthStatus.unknown,
         ));
       }
     }

@@ -849,6 +849,8 @@ class AppState extends ChangeNotifier {
     String? proxyServer,
     String? deviceId,
     bool openBrowser = true,
+    AccountHealthStatus healthStatus = AccountHealthStatus.unknown,
+    String? lastError,
   }) async {
     final account = await storage.addAccountFromToken(
       apiToken: apiToken,
@@ -857,6 +859,8 @@ class AppState extends ChangeNotifier {
       viewerId: viewerId,
       proxyServer: proxyServer,
       deviceId: deviceId,
+      healthStatus: healthStatus,
+      lastError: lastError,
     );
     notifyListeners();
     if (openBrowser) {
@@ -867,7 +871,15 @@ class AppState extends ChangeNotifier {
 
   /// Bulk create from parsed token files. Does not open a browser per account.
   Future<List<MaxAccount>> addAccountsFromTokenImports({
-    required List<({String apiToken, String? label, int? viewerId, String? deviceId})> items,
+    required List<
+            ({
+              String apiToken,
+              String? label,
+              int? viewerId,
+              String? deviceId,
+              AccountHealthStatus healthStatus,
+            })>
+        items,
     String? proxyServer,
   }) async {
     final created = <MaxAccount>[];
@@ -888,6 +900,7 @@ class AppState extends ChangeNotifier {
         viewerId: item.viewerId,
         proxyServer: proxyServer,
         deviceId: item.deviceId,
+        healthStatus: item.healthStatus,
       );
       created.add(account);
     }
@@ -907,6 +920,8 @@ class AppState extends ChangeNotifier {
       apiToken: token,
       phone: phone ?? account.phone,
       authMethod: MaxAuthMethod.token,
+      healthStatus: AccountHealthStatus.unknown,
+      clearLastError: true,
     );
     await storage.updateAccount(updated);
     selectedAccount = updated;
@@ -923,11 +938,13 @@ class AppState extends ChangeNotifier {
       account.apiToken!,
       proxy: account.isolation.proxyServer,
     );
+    await _applyHealthFromResult(account, result);
     if (!result.ok || result.profileId == null) return null;
 
-    final updated = account.copyWith(
+    final fresh = accountById(account.id) ?? account;
+    final updated = fresh.copyWith(
       viewerId: result.profileId,
-      phone: result.profilePhone ?? account.phone,
+      phone: result.profilePhone ?? fresh.phone,
       authMethod: MaxAuthMethod.token,
     );
     await storage.updateAccount(updated);
@@ -948,15 +965,16 @@ class AppState extends ChangeNotifier {
       account.apiToken!,
       proxy: account.isolation.proxyServer,
     );
+    final withHealth = await _applyHealthFromResult(account, result);
     if (!result.ok) return result;
 
     final label = (result.profileName != null && result.profileName!.trim().isNotEmpty)
         ? result.profileName!.trim()
-        : account.label;
-    final updated = account.copyWith(
+        : withHealth.label;
+    final updated = withHealth.copyWith(
       label: label,
-      viewerId: result.profileId ?? account.viewerId,
-      phone: result.profilePhone ?? result.phone ?? account.phone,
+      viewerId: result.profileId ?? withHealth.viewerId,
+      phone: result.profilePhone ?? result.phone ?? withHealth.phone,
       authMethod: MaxAuthMethod.token,
     );
     await storage.updateAccount(updated);
@@ -965,6 +983,74 @@ class AppState extends ChangeNotifier {
     }
     notifyListeners();
     return result;
+  }
+
+  /// Re-check login-by-token and persist health status.
+  Future<MaxAuthResult> checkAccountHealth(MaxAccount account) async {
+    if (!account.hasApiSession) {
+      final updated = account.copyWith(
+        healthStatus: AccountHealthStatus.unknown,
+        lastError: 'Нет токена сессии',
+        lastCheckedAt: DateTime.now(),
+      );
+      await storage.updateAccount(updated);
+      if (selectedAccount?.id == account.id) selectedAccount = updated;
+      notifyListeners();
+      return MaxAuthResult(ok: false, error: 'Нет токена сессии');
+    }
+
+    final result = await MaxAuthService.verifyToken(
+      account.apiToken!,
+      proxy: account.isolation.proxyServer,
+    );
+    final withHealth = await _applyHealthFromResult(account, result);
+    if (result.ok) {
+      final label = (result.profileName != null && result.profileName!.trim().isNotEmpty)
+          ? result.profileName!.trim()
+          : withHealth.label;
+      final updated = withHealth.copyWith(
+        label: label,
+        viewerId: result.profileId ?? withHealth.viewerId,
+        phone: result.profilePhone ?? result.phone ?? withHealth.phone,
+        authMethod: MaxAuthMethod.token,
+      );
+      await storage.updateAccount(updated);
+      if (selectedAccount?.id == account.id) selectedAccount = updated;
+      notifyListeners();
+    }
+    return result;
+  }
+
+  /// Check all token accounts sequentially. Returns counts by status.
+  Future<Map<AccountHealthStatus, int>> checkAllAccountHealth({
+    void Function(int done, int total, MaxAccount account)? onProgress,
+  }) async {
+    final list = accountsWithToken();
+    final counts = <AccountHealthStatus, int>{};
+    for (var i = 0; i < list.length; i++) {
+      final account = accountById(list[i].id) ?? list[i];
+      final result = await checkAccountHealth(account);
+      final status = result.healthStatus;
+      counts[status] = (counts[status] ?? 0) + 1;
+      onProgress?.call(i + 1, list.length, accountById(account.id) ?? account);
+    }
+    return counts;
+  }
+
+  Future<MaxAccount> _applyHealthFromResult(MaxAccount account, MaxAuthResult result) async {
+    final status = result.healthStatus;
+    final updated = account.copyWith(
+      healthStatus: status,
+      lastError: result.ok ? null : (result.error ?? result.code),
+      clearLastError: result.ok,
+      lastCheckedAt: DateTime.now(),
+    );
+    await storage.updateAccount(updated);
+    if (selectedAccount?.id == account.id) {
+      selectedAccount = updated;
+    }
+    notifyListeners();
+    return updated;
   }
 
   List<MaxAccount> accountsWithToken() =>

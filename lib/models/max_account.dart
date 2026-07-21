@@ -5,6 +5,45 @@ import 'emulator_profile.dart';
 
 enum MaxAuthMethod { qr, sms, token }
 
+/// Live check against MAX API (login-by-token).
+enum AccountHealthStatus {
+  /// Not checked yet (or no token to check).
+  unknown,
+
+  /// Token accepted — account is reachable.
+  ok,
+
+  /// MAX rejected login with ban / block / suspend signals.
+  banned,
+
+  /// Token rejected or session invalid (not clearly a ban).
+  authFailed,
+
+  /// DNS / proxy / network — status unknown.
+  networkError,
+}
+
+extension AccountHealthStatusX on AccountHealthStatus {
+  String get shortLabel => switch (this) {
+        AccountHealthStatus.unknown => 'не проверен',
+        AccountHealthStatus.ok => 'активен',
+        AccountHealthStatus.banned => 'бан',
+        AccountHealthStatus.authFailed => 'токен мёртв',
+        AccountHealthStatus.networkError => 'сеть',
+      };
+
+  String get longLabel => switch (this) {
+        AccountHealthStatus.unknown => 'Статус не проверялся',
+        AccountHealthStatus.ok => 'Аккаунт доступен',
+        AccountHealthStatus.banned => 'Аккаунт заблокирован (бан)',
+        AccountHealthStatus.authFailed => 'Токен не принят MAX',
+        AccountHealthStatus.networkError => 'Не удалось проверить (сеть/прокси)',
+      };
+
+  bool get isProblem =>
+      this == AccountHealthStatus.banned || this == AccountHealthStatus.authFailed;
+}
+
 class MaxAccount {
   MaxAccount({
     required this.id,
@@ -18,6 +57,9 @@ class MaxAccount {
     this.viewerId,
     this.authMethod = MaxAuthMethod.qr,
     this.emulator = const EmulatorProfile(),
+    this.healthStatus = AccountHealthStatus.unknown,
+    this.lastError,
+    this.lastCheckedAt,
   });
 
   final String id;
@@ -31,9 +73,14 @@ class MaxAccount {
   final int? viewerId;
   final MaxAuthMethod authMethod;
   final EmulatorProfile emulator;
+  final AccountHealthStatus healthStatus;
+  final String? lastError;
+  final DateTime? lastCheckedAt;
 
   bool get hasApiSession => apiToken != null && apiToken!.isNotEmpty;
   bool get hasEmulator => emulator.isConfigured;
+  bool get isBanned => healthStatus == AccountHealthStatus.banned;
+  bool get isHealthy => healthStatus == AccountHealthStatus.ok;
 
   /// Uzbek accounts: +998 phone, or «узб»/«uzb» in label/notes.
   bool get isUzbek {
@@ -56,6 +103,10 @@ class MaxAccount {
     int? viewerId,
     MaxAuthMethod? authMethod,
     EmulatorProfile? emulator,
+    AccountHealthStatus? healthStatus,
+    String? lastError,
+    bool clearLastError = false,
+    DateTime? lastCheckedAt,
   }) {
     return MaxAccount(
       id: id,
@@ -69,6 +120,9 @@ class MaxAccount {
       viewerId: viewerId ?? this.viewerId,
       authMethod: authMethod ?? this.authMethod,
       emulator: emulator ?? this.emulator,
+      healthStatus: healthStatus ?? this.healthStatus,
+      lastError: clearLastError ? null : (lastError ?? this.lastError),
+      lastCheckedAt: lastCheckedAt ?? this.lastCheckedAt,
     );
   }
 
@@ -84,10 +138,14 @@ class MaxAccount {
         if (viewerId != null) 'viewerId': viewerId,
         'authMethod': authMethod.name,
         if (emulator.isConfigured || emulator.lastLaunchedAt != null) 'emulator': emulator.toJson(),
+        'healthStatus': healthStatus.name,
+        if (lastError != null) 'lastError': lastError,
+        if (lastCheckedAt != null) 'lastCheckedAt': lastCheckedAt!.toIso8601String(),
       };
 
   factory MaxAccount.fromJson(Map<String, dynamic> json) {
     final authRaw = json['authMethod'] as String?;
+    final healthRaw = json['healthStatus'] as String?;
     return MaxAccount(
       id: json['id'] as String,
       label: json['label'] as String,
@@ -108,6 +166,19 @@ class MaxAccount {
               ? MaxAuthMethod.token
               : MaxAuthMethod.qr,
       emulator: EmulatorProfile.fromJson(json['emulator'] as Map<String, dynamic>?),
+      healthStatus: _parseHealth(healthRaw),
+      lastError: json['lastError'] as String?,
+      lastCheckedAt: json['lastCheckedAt'] != null
+          ? DateTime.tryParse(json['lastCheckedAt'] as String)
+          : null,
     );
+  }
+
+  static AccountHealthStatus _parseHealth(String? raw) {
+    if (raw == null) return AccountHealthStatus.unknown;
+    for (final value in AccountHealthStatus.values) {
+      if (value.name == raw) return value;
+    }
+    return AccountHealthStatus.unknown;
   }
 }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../models/max_account.dart';
 import '../providers/app_state.dart';
 import '../services/max_auth_service.dart';
 import '../services/token_file_parser.dart';
@@ -56,6 +57,8 @@ class _TokenAccountDialogState extends State<TokenAccountDialog> {
     String? phone,
     String? label,
     int? viewerId,
+    AccountHealthStatus healthStatus = AccountHealthStatus.unknown,
+    String? lastError,
   }) async {
     await context.read<AppState>().addAccountFromToken(
           apiToken: token,
@@ -64,6 +67,8 @@ class _TokenAccountDialogState extends State<TokenAccountDialog> {
           viewerId: viewerId ?? _parsedViewerId,
           proxyServer: _proxy,
           deviceId: _parsedDeviceId,
+          healthStatus: healthStatus,
+          lastError: lastError,
         );
     if (!mounted) return;
     Navigator.pop(context, true);
@@ -108,6 +113,7 @@ class _TokenAccountDialogState extends State<TokenAccountDialog> {
           phone: phone,
           label: label,
           viewerId: result.profileId ?? _parsedViewerId,
+          healthStatus: AccountHealthStatus.ok,
         );
         return;
       }
@@ -118,6 +124,24 @@ class _TokenAccountDialogState extends State<TokenAccountDialog> {
           _error = result.error;
           _canAddWithoutVerify = true;
         });
+        return;
+      }
+
+      // Clearly banned — still allow adding so the list shows the ban badge.
+      if (result.healthStatus == AccountHealthStatus.banned) {
+        setState(() => _loading = false);
+        await _addAccount(
+          token: token,
+          phone: _phoneController.text.trim().isNotEmpty
+              ? _phoneController.text.trim()
+              : null,
+          label: _labelController.text.trim().isNotEmpty
+              ? _labelController.text.trim()
+              : 'Забанен',
+          viewerId: _parsedViewerId,
+          healthStatus: AccountHealthStatus.banned,
+          lastError: result.error,
+        );
         return;
       }
 

@@ -233,8 +233,59 @@ class _ChatsPage extends StatelessWidget {
   }
 }
 
-class _ProfilesPage extends StatelessWidget {
+class _ProfilesPage extends StatefulWidget {
   const _ProfilesPage();
+
+  @override
+  State<_ProfilesPage> createState() => _ProfilesPageState();
+}
+
+class _ProfilesPageState extends State<_ProfilesPage> {
+  bool _checking = false;
+  String? _checkProgress;
+
+  Future<void> _checkAll() async {
+    final state = context.read<AppState>();
+    final total = state.accountsWithToken().length;
+    if (total == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Нет аккаунтов с токеном для проверки')),
+      );
+      return;
+    }
+
+    setState(() {
+      _checking = true;
+      _checkProgress = '0/$total';
+    });
+
+    final counts = await state.checkAllAccountHealth(
+      onProgress: (done, all, account) {
+        if (!mounted) return;
+        setState(() => _checkProgress = '$done/$all · ${account.label}');
+      },
+    );
+
+    if (!mounted) return;
+    setState(() {
+      _checking = false;
+      _checkProgress = null;
+    });
+
+    final ok = counts[AccountHealthStatus.ok] ?? 0;
+    final banned = counts[AccountHealthStatus.banned] ?? 0;
+    final dead = counts[AccountHealthStatus.authFailed] ?? 0;
+    final net = counts[AccountHealthStatus.networkError] ?? 0;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Проверено: активны $ok · бан $banned · токен мёртв $dead'
+          '${net > 0 ? ' · сеть $net' : ''}',
+        ),
+        duration: const Duration(seconds: 5),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -245,9 +296,44 @@ class _ProfilesPage extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const _PageHeader(
-          title: 'Профили',
-          subtitle: 'Изолированные сессии web.max.ru',
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Профили', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18)),
+                    SizedBox(height: 2),
+                    Text(
+                      'Изолированные сессии web.max.ru',
+                      style: TextStyle(fontSize: 12, color: Colors.white60),
+                    ),
+                  ],
+                ),
+              ),
+              TextButton.icon(
+                onPressed: _checking || accounts.isEmpty ? null : _checkAll,
+                icon: _checking
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.health_and_safety_outlined, size: 16),
+                label: Text(
+                  _checking ? (_checkProgress ?? 'Проверка…') : 'Проверить статусы',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                ),
+              ),
+            ],
+          ),
         ),
         Expanded(
           child: accounts.isEmpty
@@ -329,6 +415,7 @@ class _ProfileCard extends StatelessWidget {
                       spacing: 6,
                       runSpacing: 4,
                       children: [
+                        _HealthBadge(status: account.healthStatus),
                         _StatusBadge(
                           label: account.hasApiSession ? 'токен' : 'нет токена',
                           ok: account.hasApiSession,
@@ -414,6 +501,7 @@ class _SelectedAccountActionsState extends State<_SelectedAccountActions> {
     final result = await context.read<AppState>().refreshAccountProfile(account);
     if (!mounted) return;
     setState(() => _refreshing = false);
+    final status = context.read<AppState>().accountById(account.id)?.healthStatus;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -421,7 +509,26 @@ class _SelectedAccountActionsState extends State<_SelectedAccountActions> {
               ? 'Инфо обновлено'
                   '${result.profileName != null ? ': ${result.profileName}' : ''}'
                   '${result.profilePhone != null ? ' · ${result.profilePhone}' : ''}'
-              : (result.error ?? 'Не удалось обновить инфо'),
+                  '${status != null ? ' · ${status.shortLabel}' : ''}'
+              : '${status?.longLabel ?? 'Не удалось обновить'}: ${result.error ?? ''}',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _checkHealth() async {
+    setState(() => _refreshing = true);
+    final result = await context.read<AppState>().checkAccountHealth(account);
+    if (!mounted) return;
+    setState(() => _refreshing = false);
+    final fresh = context.read<AppState>().accountById(account.id);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          fresh != null
+              ? '${fresh.healthStatus.longLabel}'
+                  '${result.error != null && !result.ok ? ': ${result.error}' : ''}'
+              : (result.error ?? 'Готово'),
         ),
       ),
     );
@@ -479,7 +586,16 @@ class _SelectedAccountActionsState extends State<_SelectedAccountActions> {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              if (account.hasApiSession)
+              if (account.hasApiSession) ...[
+                TextButton.icon(
+                  onPressed: _refreshing ? null : _checkHealth,
+                  icon: const Icon(Icons.health_and_safety_outlined, size: 16),
+                  label: const Text('Статус', style: TextStyle(fontSize: 12)),
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                  ),
+                ),
                 TextButton.icon(
                   onPressed: _refreshing ? null : _refreshProfile,
                   icon: _refreshing
@@ -495,11 +611,21 @@ class _SelectedAccountActionsState extends State<_SelectedAccountActions> {
                     padding: const EdgeInsets.symmetric(horizontal: 8),
                   ),
                 ),
+              ],
             ],
           ),
           const SizedBox(height: 8),
           _InfoGrid(
             rows: [
+              _InfoRow(
+                label: 'статус',
+                value: account.healthStatus.longLabel +
+                    (account.lastCheckedAt != null
+                        ? ' · ${_fmt(account.lastCheckedAt!)}'
+                        : ''),
+              ),
+              if (account.lastError != null && account.lastError!.trim().isNotEmpty)
+                _InfoRow(label: 'ошибка', value: account.lastError!.trim()),
               _InfoRow(
                 label: 'viewerId',
                 value: account.viewerId?.toString() ?? '—',
@@ -674,6 +800,50 @@ class _ActionChip extends StatelessWidget {
       onPressed: onPressed,
       visualDensity: VisualDensity.compact,
       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    );
+  }
+}
+
+class _HealthBadge extends StatelessWidget {
+  const _HealthBadge({required this.status});
+
+  final AccountHealthStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final (Color bg, Color fg) = switch (status) {
+      AccountHealthStatus.ok => (
+          const Color(0xFF1B5E20).withValues(alpha: 0.55),
+          const Color(0xFFA5D6A7),
+        ),
+      AccountHealthStatus.banned => (
+          const Color(0xFFB71C1C).withValues(alpha: 0.55),
+          const Color(0xFFFFCDD2),
+        ),
+      AccountHealthStatus.authFailed => (
+          const Color(0xFFE65100).withValues(alpha: 0.45),
+          const Color(0xFFFFCC80),
+        ),
+      AccountHealthStatus.networkError => (
+          const Color(0xFF37474F).withValues(alpha: 0.55),
+          const Color(0xFFB0BEC5),
+        ),
+      AccountHealthStatus.unknown => (
+          Colors.white12,
+          Colors.white70,
+        ),
+    };
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        status.shortLabel,
+        style: TextStyle(fontSize: 10, color: fg, fontWeight: FontWeight.w600),
+      ),
     );
   }
 }

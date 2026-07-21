@@ -1,12 +1,14 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../models/max_account.dart';
 import 'node_runtime.dart';
 
 class MaxAuthResult {
   MaxAuthResult({
     required this.ok,
     this.error,
+    this.code,
     this.smsSent,
     this.requires2FA,
     this.hint,
@@ -19,6 +21,8 @@ class MaxAuthResult {
 
   final bool ok;
   final String? error;
+  /// Raw MAX / CLI error code when present (e.g. `login.token`, `user.blocked`).
+  final String? code;
   final bool? smsSent;
   final bool? requires2FA;
   final String? hint;
@@ -28,11 +32,18 @@ class MaxAuthResult {
   final String? profilePhone;
   final int? profileId;
 
+  AccountHealthStatus get healthStatus => MaxAuthService.classifyHealth(
+        ok: ok,
+        code: code,
+        error: error,
+      );
+
   factory MaxAuthResult.fromJson(Map<String, dynamic> json) {
     final profile = json['profile'] as Map<String, dynamic>?;
     return MaxAuthResult(
       ok: json['ok'] == true,
       error: _asString(json['error']),
+      code: _asString(json['code']),
       smsSent: json['smsSent'] as bool?,
       requires2FA: json['requires2FA'] as bool?,
       hint: _asString(json['hint']),
@@ -128,6 +139,7 @@ class MaxAuthService {
         error: parsed.error != null
             ? mapError(_fixMojibake(parsed.error!))
             : (parsed.ok ? null : mapError(null)),
+        code: parsed.code,
         smsSent: parsed.smsSent,
         requires2FA: parsed.requires2FA,
         hint: parsed.hint != null ? _fixMojibake(parsed.hint!) : null,
@@ -143,6 +155,7 @@ class MaxAuthService {
     return MaxAuthResult(
       ok: false,
       error: mapError(fallback.isNotEmpty ? _fixMojibake(fallback) : null),
+      code: 'cli.parse',
     );
   }
 
@@ -189,7 +202,48 @@ class MaxAuthService {
         lower.contains('network') ||
         lower.contains('dns') ||
         lower.contains('proxy') ||
-        lower.contains('socket hang up');
+        lower.contains('socket hang up') ||
+        lower.contains('network.error');
+  }
+
+  /// Map login-token result to a persisted account health status.
+  static AccountHealthStatus classifyHealth({
+    required bool ok,
+    String? code,
+    String? error,
+  }) {
+    if (ok) return AccountHealthStatus.ok;
+    if (isNetworkError(error) || isNetworkError(code)) {
+      return AccountHealthStatus.networkError;
+    }
+    final hay = '${code ?? ''} ${error ?? ''}'.toLowerCase();
+    if (_looksBanned(hay)) return AccountHealthStatus.banned;
+    return AccountHealthStatus.authFailed;
+  }
+
+  static bool _looksBanned(String hay) {
+    const markers = [
+      'ban',
+      'banned',
+      'забан',
+      'blocked',
+      'заблок',
+      'блокиров',
+      'suspend',
+      'suspended',
+      'disabled',
+      'deactivat',
+      'user.blocked',
+      'account.blocked',
+      'login.blocked',
+      'error.user.blocked',
+      'error.account.blocked',
+      'access.denied',
+    ];
+    for (final m in markers) {
+      if (hay.contains(m)) return true;
+    }
+    return false;
   }
 
   /// Pulls a session token out of raw paste (plain token, quoted, or whole __oneme_auth JSON).
