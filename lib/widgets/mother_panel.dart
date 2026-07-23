@@ -145,6 +145,13 @@ class _MotherPanelState extends State<MotherPanel> {
         channelLinkFor: (child) =>
             channelLinks[child.id] ??
             state.channelPolicyFor(child.id).lastCreatedInviteUrl,
+        onChatsSent: (child, chatIds, {messageIdsByChatId = const {}, titleByChatId = const {}}) =>
+            state.rememberTemplateSends(
+          child: child,
+          chatIds: chatIds,
+          messageIdsByChatId: messageIdsByChatId,
+          titleByChatId: titleByChatId,
+        ),
         rateSettings: state.rateSettings,
         onLog: _log,
         cancel: action.cancelToken,
@@ -216,6 +223,13 @@ class _MotherPanelState extends State<MotherPanel> {
         channelLinkFor: (child) =>
             channelLinks[child.id] ??
             state.channelPolicyFor(child.id).lastCreatedInviteUrl,
+        onChatsSent: (child, sentChatIds, {messageIdsByChatId = const {}, titleByChatId = const {}}) =>
+            state.rememberTemplateSends(
+          child: child,
+          chatIds: sentChatIds,
+          messageIdsByChatId: messageIdsByChatId,
+          titleByChatId: titleByChatId,
+        ),
         delayBeforeMs: 0,
         rateSettings: state.rateSettings,
         onLog: _log,
@@ -1720,18 +1734,19 @@ class _MotherPanelState extends State<MotherPanel> {
             ),
             const SizedBox(height: 6),
             Text(
-              'Общая база и вступление по маткам — вкладка «Каналы». '
+              'Назначения и вступление дочек — вкладка «Раздача» '
+              '(все max.ru/join и кто уже вступил). '
               'В базе: $inBase · известных: $known. '
-              'Здесь — ручные ссылки, каналы этой матки и выход.',
+              'Здесь — только каналы, куда матка уже вошла сама, ручные ссылки и выход.',
               style: theme.textTheme.bodySmall?.copyWith(fontSize: 10),
             ),
             const SizedBox(height: 8),
             OutlinedButton.icon(
               onPressed: _running
                   ? null
-                  : () => context.read<AppState>().setNavPage(AppNavPage.parse),
+                  : () => context.read<AppState>().setNavPage(AppNavPage.assign),
               icon: const Icon(Icons.open_in_new, size: 16),
-              label: const Text('Открыть «Каналы»', style: TextStyle(fontSize: 11)),
+              label: const Text('Открыть «Раздача»', style: TextStyle(fontSize: 11)),
             ),
           ],
         ),

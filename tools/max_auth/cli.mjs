@@ -268,8 +268,19 @@ async function connectWithToken(token, proxy = undefined) {
       fail(mapMaxAuthError(payload), { code: payload.error });
     }
     const profile = extractProfile(payload);
-    progress(`[API] аккаунт: id=${profile.id}, name=${profile.name ?? '?'}, phone=${profile.phone ?? '?'}`, 'info');
-    return { client, profileId: profile.id, token };
+    const loginChats = Array.isArray(payload.chats) ? payload.chats : [];
+    progress(
+      `[API] аккаунт: id=${profile.id}, name=${profile.name ?? '?'}, phone=${profile.phone ?? '?'}`
+      + `, чатов в login: ${loginChats.length}`,
+      'info',
+    );
+    return {
+      client,
+      profileId: profile.id,
+      token,
+      loginChats,
+      chatMarker: payload.chatMarker ?? null,
+    };
   };
 
   if (proxy != null && String(proxy).trim()) {
@@ -338,6 +349,24 @@ async function inviteUsersToChat(client, chatId, userIds, showHistory = true) {
 
 function rpcPayload(response, context = 'MAX API') {
   return assertRpcOk(response, context);
+}
+
+function extractMessageId(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const candidates = [
+    payload.messageId,
+    payload.id,
+    payload.message?.id,
+    payload.message?.messageId,
+    payload.messages?.[0]?.id,
+    payload.messages?.[0]?.messageId,
+  ];
+  for (const c of candidates) {
+    if (c == null) continue;
+    const s = String(c).trim();
+    if (s) return s;
+  }
+  return null;
 }
 
 function extractHashesFromText(text) {
@@ -720,8 +749,8 @@ async function findInviteHashInChat(client, chatId, backward = 160) {
   return null;
 }
 
-async function buildGroupCatalog(client, { chatIds = null } = {}, progress) {
-  const chats = await getAllChats(client);
+async function buildGroupCatalog(client, { chatIds = null, seedChats = [], chatMarker = null } = {}, progress) {
+  const chats = await getAllChats(client, { seedChats, chatMarker });
   const wanted = chatIds ? new Set(chatIds.map((id) => String(id))) : null;
   const groups = [];
 
@@ -779,9 +808,83 @@ function groupsFromJoinResults(results = []) {
   return groups;
 }
 
-async function getAllChats(client) {
-  const response = await client.invokeMethod(48, { chatIds: [0] });
-  return rpcPayload(response, 'GET_CHATS').chats ?? [];
+function withTimeout(promise, ms, label = 'timeout') {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timeout ${ms}ms`)), ms);
+    }),
+  ]);
+}
+
+async function getAllChats(client, { seedChats = [], chatMarker = null } = {}) {
+  const all = [];
+  const seen = new Set();
+  const pushAll = (chats) => {
+    for (const chat of chats ?? []) {
+      if (chat?.id == null) continue;
+      const key = String(chat.id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      all.push(chat);
+    }
+  };
+
+  // loginByToken already returns a chat page — use it first (avoids hung RPC on SOCKS).
+  pushAll(seedChats);
+  if (all.length > 0) {
+    progress(`[Каналы] из login: ${all.length}`);
+  }
+
+  // Bulk [0] — often empty, but usually returns quickly.
+  try {
+    const response = await withTimeout(
+      client.invokeMethod(48, { chatIds: [0] }),
+      12000,
+      'GET_CHATS_BULK',
+    );
+    const payload = rpcPayload(response, 'GET_CHATS_BULK');
+    const before = all.length;
+    pushAll(payload.chats);
+    if (all.length > before) {
+      progress(`[Каналы] +bulk: ${all.length - before}`);
+    }
+  } catch (error) {
+    progress(`[Каналы] bulk пропуск: ${error instanceof Error ? error.message : error}`, 'warn');
+  }
+
+  // Enough from login — do not risk GET_CHATS(53) hang on SOCKS proxies.
+  if (all.length > 0) return all;
+
+  // Last resort only when login had no chats.
+  let marker =
+    typeof chatMarker === 'number' && chatMarker > 0 ? chatMarker : Date.now();
+  for (let page = 0; page < 10; page++) {
+    try {
+      const response = await withTimeout(
+        client.invokeMethod(53, { count: 100, marker }),
+        8000,
+        'GET_CHATS',
+      );
+      const payload = rpcPayload(response, 'GET_CHATS');
+      const batch = payload.chats ?? [];
+      if (!Array.isArray(batch) || batch.length === 0) break;
+      pushAll(batch);
+      const next = payload.marker;
+      if (next == null || next === marker) break;
+      marker = next;
+      if (batch.length < 100) break;
+    } catch (error) {
+      progress(
+        `[Каналы] GET_CHATS пропуск: ${error instanceof Error ? error.message : error}`,
+        'warn',
+      );
+      break;
+    }
+  }
+
+  return all;
 }
 
 function findDialogWithUser(chats, userId) {
@@ -1959,12 +2062,39 @@ async function cmdDiscoverChannels({
 async function cmdListGroups({ token, scanMessages = true }) {
   if (!token) fail('Укажите токен матки');
 
-  const { client } = await connectWithToken(token);
+  const { client, loginChats, chatMarker } = await connectWithToken(token);
   try {
-    progress('[Каналы] загрузка списка чатов матки…');
-    const groups = await buildGroupCatalog(client, {}, progress);
+    progress('[Каналы] загрузка списка чатов…');
+    const rawChats = await getAllChats(client, {
+      seedChats: loginChats,
+      chatMarker,
+    });
+    progress(`[Каналы] в аккаунте чатов: ${rawChats.length}`);
+    const groups = [];
+    for (const chat of rawChats ?? []) {
+      if (!isGroupLikeChat(chat)) continue;
+      const chatId = String(chat.id);
+      const title = chat.title ?? chat.name ?? chatId;
+      let entry = {
+        chatId,
+        title,
+        type: chat.type ?? 'CHAT',
+        hash: extractHashFromChatObject(chat),
+        inviteUrl: null,
+        source: extractHashFromChatObject(chat) ? 'chat_list' : null,
+      };
+      if (entry.hash) entry.inviteUrl = joinUrl(entry.hash);
+
+      // For mailing we only need chatId — skip slow invite lookup when scanMessages=false.
+      if (!entry.hash && scanMessages) {
+        entry = await fetchInviteLinkFromProfile(client, chatId, title, progress);
+      }
+
+      groups.push(entry);
+    }
+    groups.sort((a, b) => String(a.title).localeCompare(String(b.title), 'ru'));
     const withLink = groups.filter((g) => g.hash).length;
-    progress(`[Каналы] найдено ${groups.length}, invite из профиля: ${withLink}`);
+    progress(`[Каналы] групп/каналов: ${groups.length}, invite: ${withLink}`);
     ok({ groups, total: groups.length, withInviteLink: withLink });
   } finally {
     await client.disconnect().catch(() => undefined);
@@ -2813,7 +2943,11 @@ async function sendChannelPost(client, chatId, text, mediaPath) {
           notify: true,
         });
         assertRpcOk(response, 'SEND_MESSAGE');
-        return { sent: true, withPhoto: true };
+        return {
+          sent: true,
+          withPhoto: true,
+          messageId: extractMessageId(rpcPayload(response, 'SEND_MESSAGE')),
+        };
       } catch (error) {
         lastError = error;
         const message = error instanceof Error ? error.message : String(error);
@@ -2839,6 +2973,7 @@ async function sendChannelPost(client, chatId, text, mediaPath) {
         sent: true,
         withPhoto: false,
         photoError: lastError instanceof Error ? lastError.message : String(lastError),
+        messageId: extractMessageId(rpcPayload(response, 'SEND_MESSAGE')),
       };
     }
     throw lastError ?? new Error('Не удалось отправить фото');
@@ -2852,7 +2987,423 @@ async function sendChannelPost(client, chatId, text, mediaPath) {
     notify: true,
   });
   assertRpcOk(response, 'SEND_MESSAGE');
-  return { sent: true, withPhoto: false };
+  return {
+    sent: true,
+    withPhoto: false,
+    messageId: extractMessageId(rpcPayload(response, 'SEND_MESSAGE')),
+  };
+}
+
+async function cmdSendChatMessages(args) {
+  const token = String(args.token ?? '').trim();
+  if (!token) fail('Укажите token');
+  const messages = Array.isArray(args.messages) ? args.messages : [];
+  if (messages.length === 0) fail('Нет сообщений для отправки');
+
+  const { client } = await connectWithToken(token, args.proxy);
+  try {
+    let sent = 0;
+    const results = [];
+    for (let i = 0; i < messages.length; i++) {
+      const row = messages[i] ?? {};
+      const chatIdRaw = String(row.chatId ?? '').trim();
+      const text = String(row.text ?? '');
+      const title = String(row.title ?? chatIdRaw);
+      const mediaPath = String(row.mediaPath ?? '').trim();
+      if (!chatIdRaw || (!text.trim() && !mediaPath)) {
+        results.push({ ok: false, chatId: chatIdRaw, error: 'пустое сообщение' });
+        continue;
+      }
+      try {
+        const chatId = normalizeChatId(chatIdRaw);
+        const outcome = await sendChannelPost(client, chatId, text, mediaPath || null);
+        if (!outcome?.sent) {
+          results.push({ ok: false, chatId: chatIdRaw, error: 'не отправлено' });
+          progress(`[Письмо] ✗ → ${title}: не отправлено`, 'warn');
+        } else {
+          sent += 1;
+          results.push({
+            ok: true,
+            chatId: chatIdRaw,
+            title,
+            ...(outcome.messageId ? { messageId: outcome.messageId } : {}),
+            ...(outcome.withPhoto ? { withPhoto: true } : {}),
+            ...(outcome.photoError ? { photoError: outcome.photoError } : {}),
+          });
+          progress(
+            `[Письмо] ✓ → ${title}${outcome.withPhoto ? ' · фото' : ''}${outcome.photoError ? ' (фото✗)' : ''}`,
+          );
+        }
+      } catch (error) {
+        const err = error instanceof Error ? error.message : String(error);
+        results.push({ ok: false, chatId: chatIdRaw, error: err });
+        progress(`[Письмо] ✗ → ${title}: ${err}`, 'warn');
+      }
+      const delayMs = Number(row.delayMs ?? 600);
+      if (i < messages.length - 1 && delayMs > 0) {
+        await sleep(Math.min(Math.max(0, delayMs), 60000));
+      }
+    }
+    ok({ sent, total: messages.length, results });
+  } finally {
+    await safeDisconnect(client);
+  }
+}
+
+/**
+ * Delete messages in chats. Each item: { chatId, messageIds: string[] }.
+ * forMe=false deletes for everyone when allowed.
+ */
+async function cmdDeleteChatMessages(args) {
+  const token = String(args.token ?? '').trim();
+  if (!token) fail('Укажите token');
+  const items = Array.isArray(args.items) ? args.items : [];
+  if (items.length === 0) fail('Нет сообщений для удаления');
+  const forMe = args.forMe === true;
+
+  const { client } = await connectWithToken(token, args.proxy);
+  try {
+    let deleted = 0;
+    const results = [];
+    for (let i = 0; i < items.length; i++) {
+      const row = items[i] ?? {};
+      const chatIdRaw = String(row.chatId ?? '').trim();
+      const messageIds = (Array.isArray(row.messageIds) ? row.messageIds : [])
+        .map((id) => String(id ?? '').trim())
+        .filter(Boolean);
+      if (!chatIdRaw || messageIds.length === 0) {
+        results.push({ ok: false, chatId: chatIdRaw, error: 'нет chatId/messageIds' });
+        continue;
+      }
+      try {
+        const chatId = normalizeChatId(chatIdRaw);
+        await client.invokeMethod(OPCODES.DELETE_MESSAGE, {
+          chatId,
+          messageIds,
+          forMe,
+        });
+        deleted += messageIds.length;
+        results.push({ ok: true, chatId: chatIdRaw, deleted: messageIds.length });
+        progress(`[Удаление] ✓ → ${chatIdRaw} (${messageIds.length})`);
+      } catch (error) {
+        const err = error instanceof Error ? error.message : String(error);
+        results.push({ ok: false, chatId: chatIdRaw, error: err });
+        progress(`[Удаление] ✗ → ${chatIdRaw}: ${err}`, 'warn');
+      }
+      if (i < items.length - 1) {
+        await sleep(400);
+      }
+    }
+    ok({ deleted, total: items.length, results, forMe });
+  } finally {
+    await safeDisconnect(client);
+  }
+}
+
+function normalizeHistoryMessage(msg, sourceChatId) {
+  const id = String(msg?.id ?? msg?.messageId ?? '').trim();
+  const text = String(msg?.text ?? '');
+  const attaches = Array.isArray(msg?.attaches) ? msg.attaches : [];
+  const hasPhoto = attaches.some((a) =>
+    String(a?._type ?? a?.type ?? '')
+      .toUpperCase()
+      .includes('PHOTO'),
+  );
+  const linkType = String(msg?.link?.type ?? '').toUpperCase();
+  const preview = text.trim()
+    || (hasPhoto ? '[фото]' : '')
+    || (attaches.length > 0 ? '[медиа]' : '')
+    || (linkType === 'FORWARD' ? '[репост]' : '')
+    || '(пусто)';
+  return {
+    id,
+    chatId: String(sourceChatId),
+    time: Number(msg?.time ?? 0) || null,
+    text,
+    type: String(msg?.type ?? 'USER'),
+    sender: msg?.sender ?? null,
+    hasPhoto,
+    hasMedia: attaches.length > 0,
+    attachCount: attaches.length,
+    isForward: linkType === 'FORWARD',
+    preview: preview.slice(0, 500),
+    raw: msg,
+  };
+}
+
+async function fetchChatHistory(client, chatId, { backward = 50, from = null } = {}) {
+  const id = normalizeChatId(chatId);
+  const payload = {
+    chatId: id,
+    forward: 0,
+    backward: Math.min(Math.max(1, Number(backward) || 50), 200),
+    getMessages: true,
+    getChat: false,
+    from: from != null ? Number(from) : Date.now(),
+  };
+  const response = await client.invokeMethod(OPCODES.GET_MESSAGES, payload);
+  const body = rpcPayload(response, 'GET_MESSAGES');
+  const messages = Array.isArray(body?.messages) ? body.messages : [];
+  return messages.map((m) => normalizeHistoryMessage(m, chatId));
+}
+
+async function cmdListChatMessages(args) {
+  const token = String(args.token ?? '').trim();
+  if (!token) fail('Укажите token');
+  const chatId = String(args.chatId ?? '').trim();
+  if (!chatId) fail('Укажите chatId');
+  const backward = Number(args.backward ?? args.limit ?? 50);
+  const from = args.from != null ? Number(args.from) : null;
+
+  const { client } = await connectWithToken(token, args.proxy);
+  try {
+    progress(`[Посты] загружаю историю ${chatId}…`);
+    const messages = await fetchChatHistory(client, chatId, { backward, from });
+    messages.sort((a, b) => (b.time ?? 0) - (a.time ?? 0));
+    progress(`[Посты] получено: ${messages.length}`);
+    ok({
+      chatId,
+      count: messages.length,
+      messages: messages.map(({ raw, ...rest }) => rest),
+      rawMessages: messages.map((m) => m.raw).filter(Boolean),
+    });
+  } finally {
+    await safeDisconnect(client);
+  }
+}
+
+async function forwardOneMessage(client, {
+  sourceChatId,
+  targetChatId,
+  messageId,
+  rawMessage = null,
+  comment = '',
+}) {
+  const target = normalizeChatId(targetChatId);
+  const source = normalizeChatId(sourceChatId);
+  const mid = String(messageId ?? rawMessage?.id ?? '').trim();
+  if (!mid) throw new Error('нет messageId');
+
+  const msgObj = rawMessage && typeof rawMessage === 'object'
+    ? {
+        id: rawMessage.id ?? mid,
+        time: rawMessage.time,
+        sender: rawMessage.sender,
+        type: rawMessage.type ?? 'USER',
+        text: rawMessage.text ?? '',
+        attaches: Array.isArray(rawMessage.attaches) ? rawMessage.attaches : [],
+        elements: Array.isArray(rawMessage.elements) ? rawMessage.elements : [],
+      }
+    : { id: mid };
+
+  const attempts = [
+    {
+      name: 'SEND_MESSAGE link FORWARD',
+      run: async () => {
+        const response = await client.invokeMethod(OPCODES.SEND_MESSAGE, {
+          chatId: target,
+          message: {
+            text: String(comment ?? ''),
+            cid: generateRandomId(),
+            elements: [],
+            link: {
+              type: 'FORWARD',
+              chatId: source,
+              message: msgObj,
+            },
+          },
+          notify: true,
+        });
+        assertRpcOk(response, 'SEND_MESSAGE FORWARD');
+        return {
+          mode: 'forward',
+          messageId: extractMessageId(rpcPayload(response, 'SEND_MESSAGE')),
+        };
+      },
+    },
+    {
+      name: 'SEND_MESSAGE link forward mid',
+      run: async () => {
+        const response = await client.invokeMethod(OPCODES.SEND_MESSAGE, {
+          chatId: target,
+          message: {
+            text: String(comment ?? ''),
+            cid: generateRandomId(),
+            elements: [],
+            link: {
+              type: 'forward',
+              mid: String(mid),
+              chatId: source,
+            },
+          },
+          notify: true,
+        });
+        assertRpcOk(response, 'SEND_MESSAGE forward mid');
+        return {
+          mode: 'forward',
+          messageId: extractMessageId(rpcPayload(response, 'SEND_MESSAGE')),
+        };
+      },
+    },
+    {
+      name: 'opcode 70',
+      run: async () => {
+        const response = await client.invokeMethod(70, {
+          chatId: target,
+          text: String(comment ?? ''),
+          messageIds: [mid],
+          linkChatId: source,
+        });
+        assertRpcOk(response, 'FORWARD_MESSAGE');
+        return {
+          mode: 'forward70',
+          messageId: extractMessageId(rpcPayload(response, 'FORWARD_MESSAGE')),
+        };
+      },
+    },
+  ];
+
+  const errors = [];
+  for (const attempt of attempts) {
+    try {
+      return await attempt.run();
+    } catch (error) {
+      errors.push(`${attempt.name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  const text = String(rawMessage?.text ?? comment ?? '').trim();
+  if (!text) {
+    throw new Error(`пересылка не удалась (${errors.join(' | ')})`);
+  }
+  const copied = await sendChannelPost(client, target, text, null);
+  if (!copied?.sent) {
+    throw new Error(`пересылка/копия не удалась (${errors.join(' | ')})`);
+  }
+  return {
+    mode: 'copy',
+    messageId: copied.messageId ?? null,
+    warn: errors.join(' | '),
+  };
+}
+
+async function cmdForwardChatMessages(args) {
+  const token = String(args.token ?? '').trim();
+  if (!token) fail('Укажите token');
+  const sourceChatId = String(args.sourceChatId ?? args.fromChatId ?? '').trim();
+  if (!sourceChatId) fail('Укажите sourceChatId');
+  const targetChatIds = [
+    ...new Set(
+      (Array.isArray(args.targetChatIds) ? args.targetChatIds : [])
+        .map((id) => String(id ?? '').trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (targetChatIds.length === 0) fail('Укажите targetChatIds');
+  const messageIds = [
+    ...new Set(
+      (Array.isArray(args.messageIds) ? args.messageIds : [])
+        .map((id) => String(id ?? '').trim())
+        .filter(Boolean),
+    ),
+  ];
+  const rawMessages = Array.isArray(args.rawMessages) ? args.rawMessages : [];
+  const comment = String(args.comment ?? '').trim();
+  const delayMs = Math.min(Math.max(0, Number(args.delayMs ?? 800)), 60000);
+
+  if (messageIds.length === 0 && rawMessages.length === 0) {
+    fail('Укажите messageIds или rawMessages');
+  }
+
+  const { client } = await connectWithToken(token, args.proxy);
+  try {
+    let sourceMsgs = [];
+    if (rawMessages.length > 0) {
+      sourceMsgs = rawMessages
+        .filter((m) => m && (m.id != null || m.messageId != null))
+        .map((m) => ({ ...m, id: m.id ?? m.messageId }));
+    } else {
+      progress(`[Пересылка] подгружаю историю источника ${sourceChatId}…`);
+      const history = await fetchChatHistory(client, sourceChatId, { backward: 100 });
+      const byId = new Map(history.map((m) => [String(m.id), m.raw]));
+      const missing = messageIds.filter((id) => !byId.has(id));
+      if (missing.length > 0) {
+        try {
+          const response = await client.invokeMethod(71, {
+            chatId: normalizeChatId(sourceChatId),
+            messageIds: missing,
+          });
+          const body = rpcPayload(response, 'GET_MESSAGE');
+          for (const m of body?.messages ?? []) {
+            if (m?.id != null) byId.set(String(m.id), m);
+          }
+        } catch (error) {
+          progress(
+            `[Пересылка] GET_MESSAGE: ${error instanceof Error ? error.message : String(error)}`,
+            'warn',
+          );
+        }
+      }
+      for (const id of messageIds) {
+        const raw = byId.get(id);
+        sourceMsgs.push(raw ? { ...raw, id: raw.id ?? id } : { id });
+      }
+    }
+
+    if (sourceMsgs.length === 0) fail('Нет сообщений для пересылки');
+
+    let forwarded = 0;
+    let copied = 0;
+    const results = [];
+    let step = 0;
+    const total = sourceMsgs.length * targetChatIds.length;
+
+    for (const msg of sourceMsgs) {
+      for (const targetChatId of targetChatIds) {
+        step += 1;
+        try {
+          const out = await forwardOneMessage(client, {
+            sourceChatId,
+            targetChatId,
+            messageId: msg.id,
+            rawMessage: msg,
+            comment,
+          });
+          if (out.mode === 'copy') copied += 1;
+          else forwarded += 1;
+          results.push({
+            ok: true,
+            targetChatId,
+            sourceMessageId: String(msg.id),
+            mode: out.mode,
+            messageId: out.messageId ?? null,
+            warn: out.warn ?? null,
+          });
+          progress(`[Пересылка] ✓ ${step}/${total} → ${targetChatId} (${out.mode})`);
+        } catch (error) {
+          const err = error instanceof Error ? error.message : String(error);
+          results.push({
+            ok: false,
+            targetChatId,
+            sourceMessageId: String(msg.id),
+            error: err,
+          });
+          progress(`[Пересылка] ✗ ${step}/${total} → ${targetChatId}: ${err}`, 'warn');
+        }
+        if (step < total && delayMs > 0) await sleep(delayMs);
+      }
+    }
+
+    ok({
+      forwarded,
+      copied,
+      failed: results.filter((r) => !r.ok).length,
+      total: results.length,
+      results,
+    });
+  } finally {
+    await safeDisconnect(client);
+  }
 }
 
 /**
@@ -3068,6 +3619,10 @@ const MOTHER_COMMANDS = new Set([
   'leave-groups',
   'funnel-setup',
   'funnel-publish',
+  'send-chat-messages',
+  'delete-chat-messages',
+  'list-chat-messages',
+  'forward-chat-messages',
 ]);
 
 try {
@@ -3144,6 +3699,18 @@ try {
       break;
     case 'funnel-publish':
       await cmdFunnelPublish(args);
+      break;
+    case 'send-chat-messages':
+      await cmdSendChatMessages(args);
+      break;
+    case 'delete-chat-messages':
+      await cmdDeleteChatMessages(args);
+      break;
+    case 'list-chat-messages':
+      await cmdListChatMessages(args);
+      break;
+    case 'forward-chat-messages':
+      await cmdForwardChatMessages(args);
       break;
     default:
       fail('Неизвестная команда');

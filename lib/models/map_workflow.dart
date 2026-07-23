@@ -3,17 +3,30 @@ class BroadcastMessageStep {
     required this.id,
     required this.text,
     this.delayAfterMs = 3000,
+    this.mediaPath,
   });
 
   final String id;
   final String text;
   final int delayAfterMs;
 
-  BroadcastMessageStep copyWith({String? text, int? delayAfterMs}) {
+  /// Optional local image path (photo attach).
+  final String? mediaPath;
+
+  bool get hasContent =>
+      text.trim().isNotEmpty || (mediaPath != null && mediaPath!.trim().isNotEmpty);
+
+  BroadcastMessageStep copyWith({
+    String? text,
+    int? delayAfterMs,
+    String? mediaPath,
+    bool clearMedia = false,
+  }) {
     return BroadcastMessageStep(
       id: id,
       text: text ?? this.text,
       delayAfterMs: delayAfterMs ?? this.delayAfterMs,
+      mediaPath: clearMedia ? null : (mediaPath ?? this.mediaPath),
     );
   }
 
@@ -21,6 +34,7 @@ class BroadcastMessageStep {
         'id': id,
         'text': text,
         'delayAfterMs': delayAfterMs,
+        if (mediaPath != null && mediaPath!.trim().isNotEmpty) 'mediaPath': mediaPath,
       };
 
   factory BroadcastMessageStep.fromJson(Map<String, dynamic> json) {
@@ -28,6 +42,9 @@ class BroadcastMessageStep {
       id: json['id'] as String? ?? DateTime.now().microsecondsSinceEpoch.toString(),
       text: json['text'] as String? ?? '',
       delayAfterMs: json['delayAfterMs'] as int? ?? 3000,
+      mediaPath: (json['mediaPath'] as String?)?.trim().isNotEmpty == true
+          ? (json['mediaPath'] as String).trim()
+          : null,
     );
   }
 }

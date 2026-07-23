@@ -869,6 +869,7 @@ class _FunnelsPanelState extends State<FunnelsPanel> {
         Expanded(
           child: _tabIndex == 0
               ? _FunnelsTab(
+                  state: state,
                   funnels: state.channelFunnels,
                   selectedId: _selectedFunnelId,
                   selected: funnel,
@@ -907,6 +908,7 @@ class _FunnelsPanelState extends State<FunnelsPanel> {
 
 class _FunnelsTab extends StatelessWidget {
   const _FunnelsTab({
+    required this.state,
     required this.funnels,
     required this.selectedId,
     required this.selected,
@@ -926,6 +928,7 @@ class _FunnelsTab extends StatelessWidget {
     required this.onReorder,
   });
 
+  final AppState state;
   final List<ChannelFunnel> funnels;
   final String? selectedId;
   final ChannelFunnel? selected;
@@ -1041,6 +1044,11 @@ class _FunnelsTab extends StatelessWidget {
             label: const Text('Опубликовать посты'),
           ),
           const SizedBox(height: 10),
+          _FunnelCreatorsCard(
+            state: state,
+            funnelId: selected!.id,
+          ),
+          const SizedBox(height: 8),
           _ChannelTemplateCard(
             funnel: selected!,
             onEdit: onEditChannelTemplate,
@@ -1182,6 +1190,109 @@ class _SimpleActionCard extends StatelessWidget {
         ),
         trailing: const Icon(Icons.chevron_right, size: 18),
         onTap: onTap,
+      ),
+    );
+  }
+}
+
+class _FunnelCreatorsCard extends StatelessWidget {
+  const _FunnelCreatorsCard({
+    required this.state,
+    required this.funnelId,
+  });
+
+  final AppState state;
+  final String funnelId;
+
+  @override
+  Widget build(BuildContext context) {
+    final creators = state.accounts.where((a) {
+      final p = state.channelPolicyFor(a.id);
+      return p.canCreateChannels && p.funnelIds.contains(funnelId);
+    }).toList();
+
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Каналы создателей',
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              creators.isEmpty
+                  ? 'Никого нет — вкладка «Аккаунты»: включите «создавать каналы» и воронку.'
+                  : 'В MAX у аккаунта канал появится только после успешного «Создание канала». '
+                      'Закрытый id из прошлых запусков — не канал.',
+              style: const TextStyle(fontSize: 11, color: Colors.white54, height: 1.35),
+            ),
+            if (creators.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              for (final account in creators) ...[
+                Builder(
+                  builder: (context) {
+                    final policy = state.channelPolicyFor(account.id);
+                    final chatId = policy.lastCreatedChatId;
+                    final title = policy.lastCreatedTitle;
+                    final invite = policy.lastCreatedInviteUrl;
+                    final hasStored = chatId != null;
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  account.profileDisplayName,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  hasStored
+                                      ? 'сохранён id $chatId'
+                                          '${title != null && title.isNotEmpty ? ' · $title' : ''}'
+                                          '${invite != null && invite.isNotEmpty ? '\n$invite' : ''}'
+                                          '\n(если в MAX пусто — id мёртвый, жмите Сбросить)'
+                                      : 'канала ещё нет — запустите воронку',
+                                  style: TextStyle(
+                                    fontSize: 10,
+                                    color: hasStored
+                                        ? Colors.orangeAccent.withValues(alpha: 0.9)
+                                        : Colors.white54,
+                                    height: 1.3,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (hasStored)
+                            TextButton(
+                              onPressed: () => state.clearAccountCreatedChannel(account.id),
+                              style: TextButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding: const EdgeInsets.symmetric(horizontal: 8),
+                              ),
+                              child: const Text('Сбросить', style: TextStyle(fontSize: 11)),
+                            ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -1504,12 +1615,26 @@ class _AccountPolicyTile extends StatelessWidget {
             ],
             if (policy.lastCreatedChatId != null) ...[
               const SizedBox(height: 6),
-              Text(
-                'Последний канал: ${policy.lastCreatedTitle ?? policy.lastCreatedChatId}'
-                ' (${policy.lastCreatedChatId})',
-                style: const TextStyle(fontSize: 10, color: Colors.white54),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Последний канал: ${policy.lastCreatedTitle ?? policy.lastCreatedChatId}'
+                      ' (${policy.lastCreatedChatId})',
+                      style: const TextStyle(fontSize: 10, color: Colors.white54),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () => state.clearAccountCreatedChannel(account.id),
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                    child: const Text('Сбросить', style: TextStyle(fontSize: 11)),
+                  ),
+                ],
               ),
             ],
           ],

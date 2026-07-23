@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../models/active_action.dart';
+import '../models/chat_history_message.dart';
 import '../models/max_channel_catalog_entry.dart';
 import '../models/mother_group_channel.dart';
 import 'node_runtime.dart';
@@ -855,6 +856,296 @@ class MaxMotherService {
       inviteUrl: inviteUrl,
     );
   }
+
+  /// Send texts into chats via Node CLI (same proxy path as list-groups).
+  /// Prefer this over Dart [MaxWsService] when accounts use HTTP/SOCKS proxies.
+  static Future<SendChatMessagesResult> sendChatMessages({
+    required String token,
+    required List<Map<String, dynamic>> messages,
+    String? proxy,
+    MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
+  }) async {
+    if (messages.isEmpty) {
+      return SendChatMessagesResult(ok: true, sent: 0, message: 'Нет сообщений');
+    }
+    final json = await _runRaw(
+      'send-chat-messages',
+      {
+        'token': token,
+        'messages': messages,
+      },
+      onProgress: onProgress,
+      proxy: proxy,
+      cancel: cancel,
+    );
+    if (json == null) {
+      return SendChatMessagesResult(
+        ok: false,
+        sent: 0,
+        message: cancel?.isCancelled == true ? 'Остановлено пользователем' : 'CLI не ответил',
+      );
+    }
+    if (json['cancelled'] == true || cancel?.isCancelled == true) {
+      return SendChatMessagesResult(ok: false, sent: 0, message: 'Остановлено пользователем');
+    }
+    if (json['ok'] != true) {
+      return SendChatMessagesResult(
+        ok: false,
+        sent: (json['sent'] as num?)?.toInt() ?? 0,
+        message: json['error']?.toString() ?? 'Ошибка отправки',
+      );
+    }
+    return SendChatMessagesResult(
+      ok: true,
+      sent: (json['sent'] as num?)?.toInt() ?? 0,
+      message: 'OK',
+      results: (json['results'] as List<dynamic>? ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList(),
+    );
+  }
+
+  static Future<DeleteChatMessagesResult> deleteChatMessages({
+    required String token,
+    required List<Map<String, dynamic>> items,
+    bool forMe = false,
+    String? proxy,
+    MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
+  }) async {
+    if (items.isEmpty) {
+      return DeleteChatMessagesResult(ok: true, deleted: 0, message: 'Нет сообщений');
+    }
+    final json = await _runRaw(
+      'delete-chat-messages',
+      {
+        'token': token,
+        'items': items,
+        'forMe': forMe,
+      },
+      onProgress: onProgress,
+      proxy: proxy,
+      cancel: cancel,
+    );
+    if (json == null) {
+      return DeleteChatMessagesResult(
+        ok: false,
+        deleted: 0,
+        message: cancel?.isCancelled == true ? 'Остановлено пользователем' : 'CLI не ответил',
+      );
+    }
+    if (json['cancelled'] == true || cancel?.isCancelled == true) {
+      return DeleteChatMessagesResult(ok: false, deleted: 0, message: 'Остановлено пользователем');
+    }
+    if (json['ok'] != true) {
+      return DeleteChatMessagesResult(
+        ok: false,
+        deleted: (json['deleted'] as num?)?.toInt() ?? 0,
+        message: json['error']?.toString() ?? 'Ошибка удаления',
+      );
+    }
+    return DeleteChatMessagesResult(
+      ok: true,
+      deleted: (json['deleted'] as num?)?.toInt() ?? 0,
+      message: 'OK',
+      results: (json['results'] as List<dynamic>? ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList(),
+    );
+  }
+
+  static Future<ListChatMessagesResult> listChatMessages({
+    required String token,
+    required String chatId,
+    int limit = 50,
+    int? from,
+    String? proxy,
+    MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
+  }) async {
+    final json = await _runRaw(
+      'list-chat-messages',
+      {
+        'token': token,
+        'chatId': chatId,
+        'backward': limit,
+        if (from != null) 'from': from,
+      },
+      onProgress: onProgress,
+      proxy: proxy,
+      cancel: cancel,
+    );
+    if (json == null) {
+      return ListChatMessagesResult(
+        ok: false,
+        message: cancel?.isCancelled == true ? 'Остановлено' : 'CLI не ответил',
+      );
+    }
+    if (json['ok'] != true) {
+      return ListChatMessagesResult(
+        ok: false,
+        message: json['error']?.toString() ?? 'Ошибка загрузки',
+      );
+    }
+    final rawList = (json['rawMessages'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+    final rawById = <String, Map<String, dynamic>>{
+      for (final r in rawList)
+        if ((r['id'] ?? r['messageId']) != null)
+          (r['id'] ?? r['messageId']).toString(): r,
+    };
+    final messages = (json['messages'] as List<dynamic>? ?? const [])
+        .whereType<Map>()
+        .map((e) {
+          final map = Map<String, dynamic>.from(e);
+          final id = (map['id'] ?? '').toString();
+          return ChatHistoryMessage.fromJson({
+            ...map,
+            'chatId': map['chatId'] ?? chatId,
+            if (rawById[id] != null) 'raw': rawById[id],
+          });
+        })
+        .where((m) => m.id.isNotEmpty)
+        .toList();
+    return ListChatMessagesResult(
+      ok: true,
+      message: 'OK',
+      chatId: json['chatId']?.toString() ?? chatId,
+      messages: messages,
+    );
+  }
+
+  static Future<ForwardChatMessagesResult> forwardChatMessages({
+    required String token,
+    required String sourceChatId,
+    required List<String> targetChatIds,
+    required List<String> messageIds,
+    List<Map<String, dynamic>> rawMessages = const [],
+    String comment = '',
+    int delayMs = 800,
+    String? proxy,
+    MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
+  }) async {
+    if (targetChatIds.isEmpty || (messageIds.isEmpty && rawMessages.isEmpty)) {
+      return ForwardChatMessagesResult(
+        ok: false,
+        forwarded: 0,
+        copied: 0,
+        message: 'Нет целей или сообщений',
+      );
+    }
+    final json = await _runRaw(
+      'forward-chat-messages',
+      {
+        'token': token,
+        'sourceChatId': sourceChatId,
+        'targetChatIds': targetChatIds,
+        'messageIds': messageIds,
+        if (rawMessages.isNotEmpty) 'rawMessages': rawMessages,
+        if (comment.trim().isNotEmpty) 'comment': comment.trim(),
+        'delayMs': delayMs,
+      },
+      onProgress: onProgress,
+      proxy: proxy,
+      cancel: cancel,
+    );
+    if (json == null) {
+      return ForwardChatMessagesResult(
+        ok: false,
+        forwarded: 0,
+        copied: 0,
+        message: cancel?.isCancelled == true ? 'Остановлено' : 'CLI не ответил',
+      );
+    }
+    if (json['ok'] != true) {
+      return ForwardChatMessagesResult(
+        ok: false,
+        forwarded: (json['forwarded'] as num?)?.toInt() ?? 0,
+        copied: (json['copied'] as num?)?.toInt() ?? 0,
+        message: json['error']?.toString() ?? 'Ошибка пересылки',
+        results: (json['results'] as List<dynamic>? ?? const [])
+            .whereType<Map>()
+            .map((e) => Map<String, dynamic>.from(e))
+            .toList(),
+      );
+    }
+    return ForwardChatMessagesResult(
+      ok: true,
+      forwarded: (json['forwarded'] as num?)?.toInt() ?? 0,
+      copied: (json['copied'] as num?)?.toInt() ?? 0,
+      message: 'OK',
+      results: (json['results'] as List<dynamic>? ?? const [])
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList(),
+    );
+  }
+}
+
+class SendChatMessagesResult {
+  SendChatMessagesResult({
+    required this.ok,
+    required this.sent,
+    required this.message,
+    this.results = const [],
+  });
+
+  final bool ok;
+  final int sent;
+  final String message;
+  final List<Map<String, dynamic>> results;
+}
+
+class DeleteChatMessagesResult {
+  DeleteChatMessagesResult({
+    required this.ok,
+    required this.deleted,
+    required this.message,
+    this.results = const [],
+  });
+
+  final bool ok;
+  final int deleted;
+  final String message;
+  final List<Map<String, dynamic>> results;
+}
+
+class ListChatMessagesResult {
+  ListChatMessagesResult({
+    required this.ok,
+    required this.message,
+    this.chatId,
+    this.messages = const [],
+  });
+
+  final bool ok;
+  final String message;
+  final String? chatId;
+  final List<ChatHistoryMessage> messages;
+}
+
+class ForwardChatMessagesResult {
+  ForwardChatMessagesResult({
+    required this.ok,
+    required this.forwarded,
+    required this.copied,
+    required this.message,
+    this.results = const [],
+  });
+
+  final bool ok;
+  final int forwarded;
+  final int copied;
+  final String message;
+  final List<Map<String, dynamic>> results;
+
+  int get failed => results.where((r) => r['ok'] != true).length;
 }
 
 class ChannelInviteResolveResult {

@@ -3,7 +3,7 @@ import '../models/join_message_template.dart';
 import '../models/map_workflow.dart';
 import '../models/max_account.dart';
 import '../models/rate_settings.dart';
-import 'max_ws_service.dart';
+import 'max_mother_service.dart';
 
 typedef ChildPostLog = void Function(String message, {String level});
 
@@ -36,12 +36,20 @@ class ChildPostJoinRunner {
   ///
   /// [channelLinkFor] returns invite URL of the child's funnel channel
   /// (`AccountChannelPolicy.lastCreatedInviteUrl`) for `{channel_link}`.
+  ///
+  /// [onChatsSent] is called once per child with chatIds that got ≥1 successful send.
   static Future<int> runFromJoinResults({
     required List<MaxAccount> tokenChildren,
     required List<Map<String, dynamic>> joinResults,
     List<BroadcastMessageStep> messages = const [],
     JoinMessageTemplate? Function(MaxAccount child)? templateFor,
     String? Function(MaxAccount child)? channelLinkFor,
+    Future<void> Function(
+      MaxAccount child,
+      List<String> chatIds, {
+      Map<String, List<String>> messageIdsByChatId,
+      Map<String, String> titleByChatId,
+    })? onChatsSent,
     required ChildPostLog onLog,
     int delayAfterJoinMs = 5000,
     RateSettings rateSettings = RateSettings.defaults,
@@ -93,7 +101,7 @@ class ChildPostJoinRunner {
     }
 
     // Resolve shared fallback or per-child templates.
-    final sharedSteps = messages.where((m) => m.text.trim().isNotEmpty).toList();
+    final sharedSteps = messages.where((m) => m.hasContent).toList();
     var anyActive = sharedSteps.isNotEmpty;
     if (templateFor != null) {
       for (final childId in byChild.keys) {
@@ -159,7 +167,7 @@ class ChildPostJoinRunner {
           childDone += 1;
           continue;
         }
-        steps = t.messages.where((m) => m.text.trim().isNotEmpty).toList();
+        steps = t.messages.where((m) => m.hasContent).toList();
       } else {
         steps = sharedSteps;
       }
@@ -187,65 +195,102 @@ class ChildPostJoinRunner {
       }
 
       final chatIds = entry.value.map((e) => e.chatId).toSet().toList();
-      final ws = MaxWsService();
-      ws.onLog = (msg, {String level = 'info'}) {
-        if (level == 'error' || level == 'warn') onLog(msg, level: level);
-      };
+      final batch = <Map<String, dynamic>>[];
+      final chatGapMs = (() {
+        if (templateFor != null) {
+          final t = templateFor(child);
+          if (t != null && t.chatGapMs > 0) return t.chatGapMs;
+        }
+        return 600;
+      })();
 
+      for (var ci = 0; ci < chatIds.length; ci++) {
+        final chatId = chatIds[ci];
+        final label = entry.value
+                .where((e) => e.chatId == chatId)
+                .map((e) => e.title)
+                .firstWhere((t) => t != null && t.trim().isNotEmpty, orElse: () => null) ??
+            chatId;
+        for (var i = 0; i < steps.length; i++) {
+          final text = resolveMessageText(
+            steps[i].text,
+            child: child,
+            channelLink: channelLink,
+          );
+          final media = steps[i].mediaPath?.trim();
+          if (text.isEmpty && (media == null || media.isEmpty)) continue;
+          final isLastOfChat = i == steps.length - 1 ||
+              steps.skip(i + 1).every((s) => !s.hasContent);
+          final delayAfter = !isLastOfChat
+              ? (steps[i].delayAfterMs > 0 ? steps[i].delayAfterMs : 600)
+              : (ci < chatIds.length - 1 ? chatGapMs : 600);
+          batch.add({
+            'chatId': chatId,
+            'title': label,
+            'text': text,
+            if (media != null && media.isNotEmpty) 'mediaPath': media,
+            'delayMs': delayAfter > 0 ? delayAfter : 600,
+          });
+        }
+      }
+      if (batch.isEmpty) {
+        childDone += 1;
+        continue;
+      }
+
+      onLog('[Письмо] «${child.label}» → ${chatIds.length} чат(ов), сообщ. ${batch.length}');
       try {
-        await ws.connect(
+        final result = await MaxMotherService.sendChatMessages(
           token: child.apiToken!,
-          deviceId: child.webDeviceId,
-          viewerId: child.viewerId,
-          targetChats: const [],
-          proxyUrl: child.isolation.proxyServer,
+          messages: batch,
+          proxy: child.isolation.proxyServer,
+          cancel: cancel,
+          onProgress: (msg) {
+            if (msg.contains('✓') || msg.contains('✗') || msg.startsWith('⚠')) {
+              onLog(msg, level: msg.contains('✗') || msg.startsWith('⚠') ? 'warn' : 'info');
+            }
+          },
         );
-        await delayUnlessCancelled(const Duration(milliseconds: 900), token: cancel);
         if (cancel?.isCancelled == true) {
           onLog('[Письмо] остановлено', level: 'warn');
           return sent;
         }
-
-        final chatGapMs = 600;
-
-        for (var c = 0; c < chatIds.length; c++) {
-          if (cancel?.isCancelled == true) break;
-          final chatId = chatIds[c];
-          final label = entry.value
-                  .where((e) => e.chatId == chatId)
-                  .map((e) => e.title)
-                  .firstWhere((t) => t != null && t.trim().isNotEmpty, orElse: () => null) ??
-              chatId;
-          for (var i = 0; i < steps.length; i++) {
-            if (cancel?.isCancelled == true) break;
-            final text = resolveMessageText(
-              steps[i].text,
-              child: child,
-              channelLink: channelLink,
-            );
-            if (text.isEmpty) continue;
-            try {
-              await ws.sendMessage(chatId, text);
-              sent += 1;
-              onLog('[Письмо] ✓ «${child.label}» → $label · сообщ. ${i + 1}/${steps.length}');
-            } catch (e) {
-              onLog('[Письмо] ✗ «${child.label}» → $label: $e', level: 'error');
+        sent += result.sent;
+        if (!result.ok && result.sent == 0) {
+          onLog(
+            '[Письмо] «${child.label}»: ${result.message}',
+            level: 'error',
+          );
+        } else {
+          onLog('[Письмо] «${child.label}»: отправлено ${result.sent}/${batch.length}');
+        }
+        if (onChatsSent != null && result.results.isNotEmpty) {
+          final okChats = <String>{};
+          final messageIdsByChatId = <String, List<String>>{};
+          final titleByChatId = <String, String>{};
+          for (final row in result.results) {
+            if (row['ok'] != true) continue;
+            final id = row['chatId']?.toString().trim() ?? '';
+            if (id.isEmpty) continue;
+            okChats.add(id);
+            final mid = row['messageId']?.toString().trim() ?? '';
+            if (mid.isNotEmpty) {
+              messageIdsByChatId.putIfAbsent(id, () => []).add(mid);
             }
-            if (i < steps.length - 1) {
-              final delay = steps[i].delayAfterMs;
-              if (delay > 0) {
-                await delayUnlessCancelled(Duration(milliseconds: delay), token: cancel);
-              }
-            }
+            final title = row['title']?.toString().trim() ?? '';
+            if (title.isNotEmpty) titleByChatId[id] = title;
           }
-          if (c < chatIds.length - 1 && chatGapMs > 0) {
-            await delayUnlessCancelled(Duration(milliseconds: chatGapMs), token: cancel);
+          if (okChats.isNotEmpty) {
+            await onChatsSent(
+              child,
+              okChats.toList(),
+              messageIdsByChatId: messageIdsByChatId,
+              titleByChatId: titleByChatId,
+            );
           }
         }
       } catch (e) {
-        onLog('[Письмо] «${child.label}» WS: $e', level: 'error');
-      } finally {
-        await ws.disconnect();
+        onLog('[Письмо] «${child.label}»: $e', level: 'error');
       }
 
       childDone += 1;
@@ -270,6 +315,12 @@ class ChildPostJoinRunner {
     List<BroadcastMessageStep> messages = const [],
     JoinMessageTemplate? Function(MaxAccount child)? templateFor,
     String? Function(MaxAccount child)? channelLinkFor,
+    Future<void> Function(
+      MaxAccount child,
+      List<String> chatIds, {
+      Map<String, List<String>> messageIdsByChatId,
+      Map<String, String> titleByChatId,
+    })? onChatsSent,
     required ChildPostLog onLog,
     int delayBeforeMs = 0,
     RateSettings rateSettings = RateSettings.defaults,
@@ -286,6 +337,7 @@ class ChildPostJoinRunner {
       messages: messages,
       templateFor: templateFor,
       channelLinkFor: channelLinkFor,
+      onChatsSent: onChatsSent,
       onLog: onLog,
       delayBeforeMs: delayBeforeMs,
       rateSettings: rateSettings,
@@ -301,6 +353,12 @@ class ChildPostJoinRunner {
     List<BroadcastMessageStep> messages = const [],
     JoinMessageTemplate? Function(MaxAccount child)? templateFor,
     String? Function(MaxAccount child)? channelLinkFor,
+    Future<void> Function(
+      MaxAccount child,
+      List<String> chatIds, {
+      Map<String, List<String>> messageIdsByChatId,
+      Map<String, String> titleByChatId,
+    })? onChatsSent,
     required ChildPostLog onLog,
     int delayBeforeMs = 0,
     RateSettings rateSettings = RateSettings.defaults,
@@ -331,6 +389,7 @@ class ChildPostJoinRunner {
       messages: messages,
       templateFor: templateFor,
       channelLinkFor: channelLinkFor,
+      onChatsSent: onChatsSent,
       onLog: onLog,
       delayAfterJoinMs: delayBeforeMs,
       rateSettings: rateSettings,

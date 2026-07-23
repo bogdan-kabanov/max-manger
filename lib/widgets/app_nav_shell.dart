@@ -87,8 +87,9 @@ class _AppNavShellState extends State<AppNavShell> {
             ? constraints.maxWidth
             : MediaQuery.sizeOf(context).width;
         final wideWorkPage = page.isWideWorkPage;
+        // Pipeline / work pages need room for lists + actions; keep map-rail pages compact.
         final contentWidth = wideWorkPage
-            ? (totalWidth < 1200 ? 360.0 : 440.0)
+            ? (totalWidth < 1200 ? 520.0 : (totalWidth < 1600 ? 640.0 : 720.0))
             : (totalWidth < 1100
                 ? 260.0
                 : (totalWidth < 1400 ? 300.0 : 340.0));

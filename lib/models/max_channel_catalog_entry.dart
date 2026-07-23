@@ -31,6 +31,7 @@ class MaxChannelCatalogEntry {
       assignedMotherAccountId != null && assignedMotherAccountId!.trim().isNotEmpty;
 
   MaxChannelCatalogEntry copyWith({
+    String? chatId,
     String? title,
     String? type,
     String? inviteHash,
@@ -41,7 +42,7 @@ class MaxChannelCatalogEntry {
     bool clearAssignment = false,
   }) {
     return MaxChannelCatalogEntry(
-      chatId: chatId,
+      chatId: chatId ?? this.chatId,
       title: title ?? this.title,
       type: type ?? this.type,
       inviteHash: inviteHash ?? this.inviteHash,

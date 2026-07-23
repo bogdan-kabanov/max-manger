@@ -9,6 +9,9 @@ class JoinMessageTemplate {
     required this.name,
     this.messages = const [],
     this.delayMs = 5000,
+    this.chatGapMs = 60000,
+    this.repeatEnabled = false,
+    this.repeatIntervalMs = 3600000,
     this.enabled = true,
   });
 
@@ -19,19 +22,31 @@ class JoinMessageTemplate {
   /// Pause after join before the first message.
   final int delayMs;
 
+  /// Gap between chats when broadcasting (1st at 0, 2nd after 1×gap, …).
+  final int chatGapMs;
+
+  /// When true, after a broadcast finishes, schedule another after [repeatIntervalMs].
+  final bool repeatEnabled;
+
+  /// Interval between automatic re-broadcasts when [repeatEnabled].
+  final int repeatIntervalMs;
+
   /// When false, assigned accounts skip writing.
   final bool enabled;
 
-  bool get hasMessages => messages.any((m) => m.text.trim().isNotEmpty);
+  bool get hasMessages => messages.any((m) => m.hasContent);
 
   bool get isActive => enabled && hasMessages;
 
-  int get messageCount => messages.where((m) => m.text.trim().isNotEmpty).length;
+  int get messageCount => messages.where((m) => m.hasContent).length;
 
   JoinMessageTemplate copyWith({
     String? name,
     List<BroadcastMessageStep>? messages,
     int? delayMs,
+    int? chatGapMs,
+    bool? repeatEnabled,
+    int? repeatIntervalMs,
     bool? enabled,
   }) {
     return JoinMessageTemplate(
@@ -39,6 +54,9 @@ class JoinMessageTemplate {
       name: name ?? this.name,
       messages: messages ?? this.messages,
       delayMs: delayMs ?? this.delayMs,
+      chatGapMs: chatGapMs ?? this.chatGapMs,
+      repeatEnabled: repeatEnabled ?? this.repeatEnabled,
+      repeatIntervalMs: repeatIntervalMs ?? this.repeatIntervalMs,
       enabled: enabled ?? this.enabled,
     );
   }
@@ -48,6 +66,9 @@ class JoinMessageTemplate {
         'name': name,
         'messages': messages.map((m) => m.toJson()).toList(),
         'delayMs': delayMs,
+        'chatGapMs': chatGapMs,
+        'repeatEnabled': repeatEnabled,
+        'repeatIntervalMs': repeatIntervalMs,
         'enabled': enabled,
       };
 
@@ -62,6 +83,9 @@ class JoinMessageTemplate {
           .map(BroadcastMessageStep.fromJson)
           .toList(),
       delayMs: (json['delayMs'] as num?)?.toInt() ?? 5000,
+      chatGapMs: (json['chatGapMs'] as num?)?.toInt() ?? 60000,
+      repeatEnabled: json['repeatEnabled'] == true,
+      repeatIntervalMs: (json['repeatIntervalMs'] as num?)?.toInt() ?? 3600000,
       enabled: json['enabled'] != false,
     );
   }
@@ -70,6 +94,7 @@ class JoinMessageTemplate {
     String? name,
     List<BroadcastMessageStep>? messages,
     int delayMs = 5000,
+    int chatGapMs = 60000,
   }) {
     return JoinMessageTemplate(
       id: const Uuid().v4(),
@@ -79,10 +104,10 @@ class JoinMessageTemplate {
             BroadcastMessageStep(
               id: const Uuid().v4(),
               text: '',
-              delayAfterMs: 3000,
             ),
           ],
       delayMs: delayMs,
+      chatGapMs: chatGapMs,
     );
   }
 }

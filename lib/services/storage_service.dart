@@ -18,6 +18,7 @@ import '../models/max_channel_catalog_entry.dart';
 import '../models/mother_group_channel.dart';
 import '../models/pipeline_journal_event.dart';
 import '../models/rate_settings.dart';
+import '../models/template_sent_record.dart';
 
 class StorageService {
   StorageService._();
@@ -56,6 +57,17 @@ class StorageService {
   static const int pipelineJournalCap = 400;
   /// accountId::chatId → membership record.
   final Map<String, AccountGroupMembership> accountGroupMemberships = {};
+  /// accountId::chatId::templateId — successful template sends (skip / re-mail).
+  final Set<String> templateSentKeys = {};
+  /// Richer ledger with messageIds for delete + timestamps.
+  final Map<String, TemplateSentRecord> templateSentRecords = {};
+
+  static String templateSentKey({
+    required String accountId,
+    required String chatId,
+    required String templateId,
+  }) =>
+      '$accountId::$chatId::$templateId';
 
   Future<void> init() async {
     final support = await getApplicationSupportDirectory();
@@ -174,6 +186,8 @@ class StorageService {
       matkaTemplateBindings = [];
       pipelineJournal = [];
       accountGroupMemberships.clear();
+      templateSentKeys.clear();
+      templateSentRecords.clear();
       return;
     }
 
@@ -269,6 +283,32 @@ class StorageService {
       final m = AccountGroupMembership.fromJson(entry);
       if (m.accountId.isEmpty || m.chatId.isEmpty) continue;
       accountGroupMemberships[m.key] = m;
+    }
+    templateSentKeys
+      ..clear()
+      ..addAll(
+        (data['templateSentKeys'] as List<dynamic>? ?? const [])
+            .map((e) => e.toString().trim())
+            .where((e) => e.split('::').length >= 3),
+      );
+    templateSentRecords.clear();
+    final rawSent = data['templateSentRecords'] as List<dynamic>? ?? const [];
+    for (final entry in rawSent.whereType<Map<String, dynamic>>()) {
+      final r = TemplateSentRecord.fromJson(entry);
+      if (r.accountId.isEmpty || r.chatId.isEmpty || r.templateId.isEmpty) continue;
+      templateSentRecords[r.key] = r;
+      templateSentKeys.add(r.key);
+    }
+    // Migrate bare keys into empty records.
+    for (final key in templateSentKeys) {
+      if (templateSentRecords.containsKey(key)) continue;
+      final parts = key.split('::');
+      if (parts.length < 3) continue;
+      templateSentRecords[key] = TemplateSentRecord(
+        accountId: parts[0],
+        chatId: parts[1],
+        templateId: parts.sublist(2).join('::'),
+      );
     }
     final migrated = _migrateLegacyClusterPostJoin();
     _pendingJoinMigrationFlush = migrated;
@@ -375,6 +415,9 @@ class StorageService {
       'pipelineJournal': pipelineJournal.map((e) => e.toJson()).toList(),
       'accountGroupMemberships':
           accountGroupMemberships.values.map((m) => m.toJson()).toList(),
+      'templateSentKeys': templateSentKeys.toList()..sort(),
+      'templateSentRecords':
+          templateSentRecords.values.map((r) => r.toJson()).toList(),
     };
     final tmp = File('${_dbFile.path}.tmp');
     await tmp.writeAsString(jsonEncode(payload));
@@ -609,8 +652,145 @@ class StorageService {
             e,
       ];
       accountGroupMemberships.removeWhere((_, m) => m.accountId == id);
+      templateSentKeys.removeWhere((k) => k.startsWith('$id::'));
+      templateSentRecords.removeWhere((k, _) => k.startsWith('$id::'));
     });
     await _deleteProfileDir(id);
+  }
+
+  bool hasTemplateSent({
+    required String accountId,
+    required String chatId,
+    required String templateId,
+  }) {
+    final a = accountId.trim();
+    final c = chatId.trim();
+    final t = templateId.trim();
+    if (a.isEmpty || c.isEmpty || t.isEmpty) return false;
+    final key = templateSentKey(accountId: a, chatId: c, templateId: t);
+    return templateSentRecords.containsKey(key) || templateSentKeys.contains(key);
+  }
+
+  TemplateSentRecord? templateSentRecord({
+    required String accountId,
+    required String chatId,
+    required String templateId,
+  }) {
+    final key = templateSentKey(
+      accountId: accountId.trim(),
+      chatId: chatId.trim(),
+      templateId: templateId.trim(),
+    );
+    return templateSentRecords[key];
+  }
+
+  List<TemplateSentRecord> templateSentRecordsFor({
+    String? templateId,
+    String? accountId,
+  }) {
+    final t = templateId?.trim();
+    final a = accountId?.trim();
+    return [
+      for (final r in templateSentRecords.values)
+        if ((t == null || t.isEmpty || r.templateId == t) &&
+            (a == null || a.isEmpty || r.accountId == a))
+          r,
+    ];
+  }
+
+  Future<void> markTemplateSentMany({
+    required String accountId,
+    required Iterable<String> chatIds,
+    required String templateId,
+    Map<String, List<String>> messageIdsByChatId = const {},
+    Map<String, String> titleByChatId = const {},
+  }) =>
+      _mutate(() async {
+        final a = accountId.trim();
+        final t = templateId.trim();
+        if (a.isEmpty || t.isEmpty) return;
+        final now = DateTime.now();
+        for (final raw in chatIds) {
+          final c = raw.trim();
+          if (c.isEmpty) continue;
+          final key = templateSentKey(accountId: a, chatId: c, templateId: t);
+          templateSentKeys.add(key);
+          final prev = templateSentRecords[key];
+          final ids = messageIdsByChatId[c] ?? const <String>[];
+          final mergedIds = <String>{
+            ...?prev?.messageIds,
+            ...ids,
+          }.toList();
+          templateSentRecords[key] = TemplateSentRecord(
+            accountId: a,
+            chatId: c,
+            templateId: t,
+            title: titleByChatId[c] ?? prev?.title ?? '',
+            messageIds: mergedIds,
+            sentAt: now,
+          );
+        }
+      });
+
+  Future<void> clearTemplateSentHistory({
+    String? templateId,
+    String? accountId,
+    Iterable<String>? chatIds,
+  }) =>
+      _mutate(() async {
+        final t = templateId?.trim();
+        final a = accountId?.trim();
+        final chats = chatIds?.map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
+        if ((t == null || t.isEmpty) &&
+            (a == null || a.isEmpty) &&
+            (chats == null || chats.isEmpty)) {
+          templateSentKeys.clear();
+          templateSentRecords.clear();
+          return;
+        }
+        templateSentKeys.removeWhere((key) {
+          final parts = key.split('::');
+          if (parts.length < 3) return true;
+          final keyAccount = parts[0];
+          final keyChat = parts[1];
+          final keyTemplate = parts.sublist(2).join('::');
+          if (a != null && a.isNotEmpty && keyAccount != a) return false;
+          if (t != null && t.isNotEmpty && keyTemplate != t) return false;
+          if (chats != null && chats.isNotEmpty && !chats.contains(keyChat)) {
+            return false;
+          }
+          return true;
+        });
+        templateSentRecords.removeWhere((key, r) {
+          if (a != null && a.isNotEmpty && r.accountId != a) return false;
+          if (t != null && t.isNotEmpty && r.templateId != t) return false;
+          if (chats != null && chats.isNotEmpty && !chats.contains(r.chatId)) {
+            return false;
+          }
+          return true;
+        });
+      });
+
+  int countTemplateSent({String? templateId, String? accountId}) {
+    final t = templateId?.trim();
+    final a = accountId?.trim();
+    var n = 0;
+    for (final r in templateSentRecords.values) {
+      if (a != null && a.isNotEmpty && r.accountId != a) continue;
+      if (t != null && t.isNotEmpty && r.templateId != t) continue;
+      n += 1;
+    }
+    if (n > 0) return n;
+    for (final key in templateSentKeys) {
+      final parts = key.split('::');
+      if (parts.length < 3) continue;
+      final keyAccount = parts[0];
+      final keyTemplate = parts.sublist(2).join('::');
+      if (a != null && a.isNotEmpty && keyAccount != a) continue;
+      if (t != null && t.isNotEmpty && keyTemplate != t) continue;
+      n += 1;
+    }
+    return n;
   }
 
   Future<void> _deleteProfileDir(String id) async {

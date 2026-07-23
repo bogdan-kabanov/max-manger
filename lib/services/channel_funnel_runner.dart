@@ -26,6 +26,19 @@ class FunnelRunSummary {
 
 /// Resolves templates and runs funnel-setup for assigned accounts.
 class ChannelFunnelRunner {
+  static bool _isDeadChannelMessage(String? raw) {
+    final m = (raw ?? '').toLowerCase();
+    if (m.isEmpty) return false;
+    return m.contains('чат закрыт') ||
+        m.contains('chat closed') ||
+        m.contains('chat.closed') ||
+        (m.contains('closed') && m.contains('chat')) ||
+        m.contains('не найден') ||
+        m.contains('not found') ||
+        m.contains('нет прав') ||
+        m.contains('forbidden');
+  }
+
   String resolveTemplate(
     String template, {
     required MaxAccount account,
@@ -121,8 +134,42 @@ class ChannelFunnelRunner {
       }
 
       final existingPolicy = policyFor(account.id);
-      final existingChatId = existingPolicy.lastCreatedChatId?.trim();
-      final hasExistingChannel = existingChatId != null && existingChatId.isNotEmpty;
+      var existingChatId = existingPolicy.lastCreatedChatId?.trim();
+      var existingInvite = existingPolicy.lastCreatedInviteUrl?.trim() ?? '';
+
+      // Stale chatId (closed / deleted) must not block creating a real channel.
+      if (existingChatId != null && existingChatId.isNotEmpty) {
+        final check = await MaxMotherService.resolveChannelInvite(
+          token: account.apiToken!,
+          chatId: existingChatId,
+          proxy: account.isolation.proxyServer,
+          onProgress: (msg) => onLog(msg),
+          cancel: cancel,
+        );
+        final dead = !check.ok ||
+            _isDeadChannelMessage(check.message) ||
+            (check.inviteUrl == null || check.inviteUrl!.trim().isEmpty);
+        if (dead) {
+          onLog(
+            '[Воронка] «${account.profileDisplayName}»: сохранённый канал '
+            '$existingChatId недоступен (${check.message}) — создаём новый',
+            level: 'warn',
+          );
+          await savePolicy(existingPolicy.copyWith(clearLastCreated: true));
+          existingChatId = null;
+          existingInvite = '';
+        } else if (check.inviteUrl != null && check.inviteUrl!.trim().isNotEmpty) {
+          existingInvite = check.inviteUrl!.trim();
+          if (existingPolicy.lastCreatedInviteUrl?.trim() != existingInvite) {
+            await savePolicy(
+              existingPolicy.copyWith(lastCreatedInviteUrl: existingInvite),
+            );
+          }
+        }
+      }
+
+      final hasExistingChannel =
+          existingChatId != null && existingChatId.isNotEmpty;
 
       final title = resolveTemplate(
         funnel.channelTitle,
@@ -140,7 +187,7 @@ class ChannelFunnelRunner {
               index: i + 1,
             );
 
-      final channelLink = existingPolicy.lastCreatedInviteUrl?.trim() ?? '';
+      final channelLink = existingInvite;
       final posts = funnel.publications
           .map((p) {
             final text = resolveTemplate(
@@ -171,13 +218,17 @@ class ChannelFunnelRunner {
           total: targets.length,
         );
 
+        var recreate = false;
         if (funnel.publishAfterCreate && posts.isNotEmpty) {
           final pub = await MaxMotherService.funnelPublish(
             token: account.apiToken!,
-            chatId: existingChatId,
+            chatId: existingChatId!,
             posts: posts,
             proxy: account.isolation.proxyServer,
-            onProgress: (msg) => onLog(msg),
+            onProgress: (msg) {
+              onLog(msg);
+              if (_isDeadChannelMessage(msg)) recreate = true;
+            },
             cancel: cancel,
           );
           processed += 1;
@@ -193,69 +244,70 @@ class ChannelFunnelRunner {
               cancelled: true,
             );
           }
-          if (pub.inviteUrl != null && pub.inviteUrl!.trim().isNotEmpty) {
-            await savePolicy(
-              existingPolicy.copyWith(lastCreatedInviteUrl: pub.inviteUrl),
+          if (pub.postsSent == 0 || recreate || _isDeadChannelMessage(pub.message)) {
+            onLog(
+              '[Воронка] «${account.profileDisplayName}»: в старый канал писать нельзя '
+              '(чат закрыт / 0 постов) — создаём новый',
+              level: 'warn',
             );
-          }
-          if (pub.ok && pub.postsSent > 0) {
+            await savePolicy(
+              policyFor(account.id).copyWith(clearLastCreated: true),
+            );
+            recreate = true;
+            processed -= 1; // creation path will count again
+          } else {
+            var inviteUrl = pub.inviteUrl?.trim() ?? existingInvite;
+            if (inviteUrl.isEmpty) {
+              final resolved = await MaxMotherService.resolveChannelInvite(
+                token: account.apiToken!,
+                chatId: existingChatId,
+                proxy: account.isolation.proxyServer,
+                onProgress: (msg) => onLog(msg),
+                cancel: cancel,
+              );
+              if (resolved.ok) inviteUrl = resolved.inviteUrl?.trim() ?? '';
+            }
+            if (inviteUrl.isNotEmpty) {
+              await savePolicy(
+                policyFor(account.id).copyWith(lastCreatedInviteUrl: inviteUrl),
+              );
+            }
             okCount += 1;
             onLog(
               '[Воронка] ✓ ${account.profileDisplayName}: посты в существующий канал '
               '(${pub.postsSent})',
             );
-          } else if (pub.ok) {
-            okCount += 1;
-            onLog('[Воронка] ✓ ${account.profileDisplayName}: канал без новых постов');
-          } else {
-            failCount += 1;
-            onLog(
-              '[Воронка] ✗ ${account.profileDisplayName}: ${pub.message}',
-              level: 'error',
-            );
           }
         } else {
-          // No posts to send — still refresh invite URL if missing (for {channel_link}).
-          if (existingPolicy.lastCreatedInviteUrl == null ||
-              existingPolicy.lastCreatedInviteUrl!.trim().isEmpty) {
-            final pub = await MaxMotherService.funnelPublish(
-              token: account.apiToken!,
-              chatId: existingChatId,
-              posts: const [],
-              proxy: account.isolation.proxyServer,
-              onProgress: (msg) => onLog(msg),
-              cancel: cancel,
-            );
-            if (pub.inviteUrl != null && pub.inviteUrl!.trim().isNotEmpty) {
-              await savePolicy(
-                existingPolicy.copyWith(lastCreatedInviteUrl: pub.inviteUrl),
-              );
-              onLog(
-                '[Воронка] ✓ ${account.profileDisplayName}: сохранена ссылка канала',
-              );
-            }
-          }
+          // No posts to send — invite already verified above.
           processed += 1;
           okCount += 1;
           onLog('[Воронка] ✓ ${account.profileDisplayName}: пропуск создания');
         }
 
-        onProgress?.call(
-          account.profileDisplayName,
-          done: processed,
-          total: targets.length,
-        );
-
-        if (i < targets.length - 1 && funnel.accountGapMs > 0) {
-          await delayUnlessCancelled(
-            Duration(milliseconds: funnel.accountGapMs),
-            token: cancel,
+        if (!recreate) {
+          onProgress?.call(
+            account.profileDisplayName,
+            done: processed,
+            total: targets.length,
           );
-        }
-        continue;
-      }
 
-      onLog('[Воронка] ${i + 1}/${targets.length} · ${account.profileDisplayName} → «$title»');
+          if (i < targets.length - 1 && funnel.accountGapMs > 0) {
+            await delayUnlessCancelled(
+              Duration(milliseconds: funnel.accountGapMs),
+              token: cancel,
+            );
+          }
+          continue;
+        }
+
+        // Fall through to funnelSetup with cleared policy / fresh posts link.
+        onLog(
+          '[Воронка] ${i + 1}/${targets.length} · ${account.profileDisplayName} → «$title» (новый канал)',
+        );
+      } else {
+        onLog('[Воронка] ${i + 1}/${targets.length} · ${account.profileDisplayName} → «$title»');
+      }
       onProgress?.call(
         '${account.profileDisplayName} → «$title»',
         done: i,
@@ -363,6 +415,7 @@ class ChannelFunnelRunner {
     required List<MaxAccount> accounts,
     required List<MotherCluster> clusters,
     required AccountChannelPolicy Function(String accountId) policyFor,
+    required Future<void> Function(AccountChannelPolicy policy) savePolicy,
     Set<String>? accountIds,
     required FunnelLog onLog,
     ActionCancelToken? cancel,
@@ -493,12 +546,16 @@ class ChannelFunnelRunner {
         total: targets.length,
       );
 
+      var dead = false;
       final result = await MaxMotherService.funnelPublish(
         token: account.apiToken!,
         chatId: target.chatId,
         posts: posts,
         proxy: account.isolation.proxyServer,
-        onProgress: (msg) => onLog(msg),
+        onProgress: (msg) {
+          onLog(msg);
+          if (_isDeadChannelMessage(msg)) dead = true;
+        },
         cancel: cancel,
       );
 
@@ -516,25 +573,32 @@ class ChannelFunnelRunner {
       }
 
       processed += 1;
+      dead = dead || _isDeadChannelMessage(result.message);
 
-      if (result.ok && result.postsSent > 0) {
+      if (result.ok && result.postsSent > 0 && !dead) {
         okCount += 1;
         onLog(
           '[Воронка] ✓ ${account.profileDisplayName}: постов ${result.postsSent}'
           '${result.photoFailures > 0 ? ' (фото✗ ${result.photoFailures})' : ''}',
         );
-      } else if (result.ok) {
-        failCount += 1;
-        onLog(
-          '[Воронка] ✗ ${account.profileDisplayName}: посты не ушли',
-          level: 'error',
-        );
       } else {
         failCount += 1;
-        onLog(
-          '[Воронка] ✗ ${account.profileDisplayName}: ${result.message}',
-          level: 'error',
-        );
+        if (dead || result.postsSent == 0) {
+          await savePolicy(
+            policyFor(account.id).copyWith(clearLastCreated: true),
+          );
+          onLog(
+            '[Воронка] ✗ ${account.profileDisplayName}: канала в MAX нет '
+            '(чат ${target.chatId} закрыт/мёртвый). Сохранённый id сброшен — '
+            'жмите «Запустить воронку», чтобы создать новый канал.',
+            level: 'error',
+          );
+        } else {
+          onLog(
+            '[Воронка] ✗ ${account.profileDisplayName}: ${result.message}',
+            level: 'error',
+          );
+        }
       }
 
       onProgress?.call(

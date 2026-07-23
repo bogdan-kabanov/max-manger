@@ -21,6 +21,7 @@ import '../models/max_channel_catalog_entry.dart';
 import '../models/mother_group_channel.dart';
 import '../models/pipeline_journal_event.dart';
 import '../models/rate_settings.dart';
+import '../models/template_send_scope.dart';
 import '../services/browser_session_manager.dart';
 import '../services/ai_chat_service.dart';
 import '../services/emulator_macro_runner.dart';
@@ -32,6 +33,7 @@ import '../services/channel_funnel_runner.dart';
 import '../services/child_post_join_runner.dart';
 import '../services/max_mother_service.dart';
 import '../services/pipeline_group_planner.dart';
+import '../utils/join_link_parser.dart';
 import '../services/scenario_scheduler.dart';
 import '../services/storage_service.dart';
 
@@ -55,6 +57,7 @@ class AppState extends ChangeNotifier {
   final ChannelFunnelRunner _funnelRunner = ChannelFunnelRunner();
   Timer? _dailyTemplateTimer;
   final Set<String> _firedDailyKeys = {};
+  final Map<String, DateTime> _lastTemplateRepeatAt = {};
   bool funnelRunning = false;
   final List<ActiveAction> _activeActions = [];
   int _actionSeq = 0;
@@ -235,6 +238,106 @@ class AppState extends ChangeNotifier {
     if (bindings.length != matkaTemplateBindings.length) {
       await _persistMatkaTemplateBindings(bindings);
     }
+    await storage.clearTemplateSentHistory(templateId: templateId);
+  }
+
+  int countTemplateSentHistory(String templateId) =>
+      storage.countTemplateSent(templateId: templateId);
+
+  Future<void> clearTemplateSentHistory(String templateId) async {
+    await storage.clearTemplateSentHistory(templateId: templateId);
+    notifyListeners();
+  }
+
+  Future<String> deleteTemplateMessages({
+    required MaxAccount account,
+    required String templateId,
+    required List<String> chatIds,
+  }) async {
+    if (!account.hasApiSession) return 'Нет токена';
+    final items = <Map<String, dynamic>>[];
+    for (final chatId in chatIds) {
+      final rec = storage.templateSentRecord(
+        accountId: account.id,
+        chatId: chatId,
+        templateId: templateId,
+      );
+      if (rec == null || rec.messageIds.isEmpty) continue;
+      items.add({'chatId': chatId, 'messageIds': rec.messageIds});
+    }
+    if (items.isEmpty) {
+      return 'Нет id сообщений для удаления';
+    }
+
+    final action = beginAction(
+      kind: ActiveActionKind.postJoinMessage,
+      title: 'Удаление сообщений',
+      subtitle: '${items.length} чат(ов)',
+    );
+    try {
+      final result = await MaxMotherService.deleteChatMessages(
+        token: account.apiToken!,
+        items: items,
+        forMe: false,
+        proxy: account.isolation.proxyServer,
+        cancel: action.cancelToken,
+        onProgress: (msg) {
+          browser.logMessage(msg);
+          updateActionProgress(action.id, message: msg);
+        },
+      );
+      final okChats = <String>[
+        for (final row in result.results)
+          if (row['ok'] == true) row['chatId']?.toString().trim() ?? '',
+      ].where((e) => e.isNotEmpty).toList();
+      if (okChats.isNotEmpty) {
+        await storage.clearTemplateSentHistory(
+          templateId: templateId,
+          accountId: account.id,
+          chatIds: okChats,
+        );
+        notifyListeners();
+      }
+      final message = result.ok
+          ? 'Удалено id: ${result.deleted} · чатов: ${okChats.length}'
+          : (result.message.isNotEmpty
+              ? result.message
+              : 'Ошибка удаления (удалено ${result.deleted})');
+      finishAction(
+        action.id,
+        status: result.ok
+            ? ActiveActionStatus.completed
+            : ActiveActionStatus.failed,
+        message: message,
+      );
+      return message;
+    } catch (e) {
+      finishAction(
+        action.id,
+        status: ActiveActionStatus.failed,
+        message: e.toString(),
+      );
+      return e.toString();
+    }
+  }
+
+  Future<void> rememberTemplateSends({
+    required MaxAccount child,
+    required List<String> chatIds,
+    String? templateId,
+    Map<String, List<String>> messageIdsByChatId = const {},
+    Map<String, String> titleByChatId = const {},
+  }) async {
+    final id = (templateId ?? storage.joinTemplateByAccountId[child.id] ?? '').trim();
+    if (id.isEmpty || chatIds.isEmpty) return;
+    await storage.markTemplateSentMany(
+      accountId: child.id,
+      chatIds: chatIds,
+      templateId: id,
+      messageIdsByChatId: messageIdsByChatId,
+      titleByChatId: titleByChatId,
+    );
+    notifyListeners();
   }
 
   List<MatkaTemplateBinding> get matkaTemplateBindings =>
@@ -294,6 +397,111 @@ class AppState extends ChangeNotifier {
           : 'Матке «${mother?.label ?? motherAccountId}» назначено ${ids.length} групп',
       motherAccountId: motherAccountId,
       detail: ids.take(20).join(', '),
+    );
+  }
+
+  /// Paste `https://max.ru/join/…` links into catalog and assign to [motherAccountId].
+  /// Returns counts: added / alreadyKnown / invalid.
+  Future<({int added, int alreadyKnown, int invalid})> importJoinLinksToMother({
+    required String motherAccountId,
+    required String rawText,
+  }) async {
+    final mother = accountById(motherAccountId);
+    if (mother == null) {
+      return (added: 0, alreadyKnown: 0, invalid: 0);
+    }
+
+    final hashes = JoinLinkParser.parseHashes(rawText);
+    if (hashes.isEmpty) {
+      return (added: 0, alreadyKnown: 0, invalid: 0);
+    }
+
+    final knownHashes = <String>{
+      for (final e in channelCatalog)
+        if (e.hasInviteLink) e.inviteHash!,
+    };
+
+    final incoming = <MaxChannelCatalogEntry>[];
+    var alreadyKnown = 0;
+    for (final hash in hashes) {
+      if (!MotherGroupChannel.isValidInviteHash(hash)) continue;
+      if (knownHashes.contains(hash)) {
+        alreadyKnown += 1;
+        // Still ensure assignment to this mother if free / other.
+        continue;
+      }
+      knownHashes.add(hash);
+      incoming.add(
+        MaxChannelCatalogEntry(
+          chatId: 'invite:$hash',
+          title: 'ссылка ${hash.length > 14 ? '${hash.substring(0, 12)}…' : hash}',
+          type: 'link',
+          inviteHash: hash,
+          source: 'paste',
+          discoveredAt: DateTime.now(),
+          assignedMotherAccountId: motherAccountId,
+        ),
+      );
+    }
+
+    // Re-assign existing catalog rows that match pasted hashes.
+    final reassignIds = <String>[
+      for (final e in channelCatalog)
+        if (e.hasInviteLink &&
+            hashes.contains(e.inviteHash) &&
+            e.assignedMotherAccountId != motherAccountId)
+          e.chatId,
+    ];
+
+    if (incoming.isNotEmpty) {
+      await storage.mergeChannelCatalog(incoming);
+    }
+    if (reassignIds.isNotEmpty) {
+      await storage.assignCatalogGroupsToMother(
+        chatIds: reassignIds,
+        motherAccountId: motherAccountId,
+      );
+    }
+
+    final added = incoming.length;
+    final moved = reassignIds.length;
+    if (added > 0 || moved > 0) {
+      await addPipelineJournal(
+        kind: PipelineJournalKind.assign,
+        message:
+            'Матке «${mother.label}» импорт ссылок: +$added'
+            '${moved > 0 ? ', переназначено $moved' : ''}'
+            '${alreadyKnown > 0 ? ', уже были $alreadyKnown' : ''}',
+        motherAccountId: motherAccountId,
+      );
+      notifyListeners();
+    } else if (alreadyKnown > 0) {
+      // Ensure already-known free ones get assigned.
+      final freeKnown = [
+        for (final e in channelCatalog)
+          if (e.hasInviteLink &&
+              hashes.contains(e.inviteHash) &&
+              !e.isAssigned)
+            e.chatId,
+      ];
+      if (freeKnown.isNotEmpty) {
+        await assignCatalogGroupsToMother(
+          chatIds: freeKnown,
+          motherAccountId: motherAccountId,
+        );
+        return (
+          added: freeKnown.length,
+          alreadyKnown: alreadyKnown - freeKnown.length,
+          invalid: 0,
+        );
+      }
+      notifyListeners();
+    }
+
+    return (
+      added: added + moved,
+      alreadyKnown: alreadyKnown,
+      invalid: 0,
     );
   }
 
@@ -364,11 +572,33 @@ class AppState extends ChangeNotifier {
 
   PipelineLaunchPlan buildPipelineLaunchPlan({
     Set<String> alreadyJoinedChatIds = const {},
+    String? onlyMotherId,
+    Set<String>? onlyChatIds,
   }) {
+    var catalog = channelCatalog;
+    if (onlyMotherId != null && onlyMotherId.isNotEmpty) {
+      catalog = [
+        for (final e in catalog)
+          if (e.assignedMotherAccountId == onlyMotherId) e,
+      ];
+    }
+    if (onlyChatIds != null && onlyChatIds.isNotEmpty) {
+      catalog = [
+        for (final e in catalog)
+          if (onlyChatIds.contains(e.chatId)) e,
+      ];
+    }
+    var clusters = motherClusters;
+    if (onlyMotherId != null && onlyMotherId.isNotEmpty) {
+      clusters = [
+        for (final c in clusters)
+          if (c.motherAccountId == onlyMotherId) c,
+      ];
+    }
     return PipelineGroupPlanner.build(
-      clusters: motherClusters,
+      clusters: clusters,
       accounts: accounts,
-      catalog: channelCatalog,
+      catalog: catalog,
       alreadyJoinedChatIds: alreadyJoinedChatIds,
     );
   }
@@ -386,11 +616,462 @@ class AppState extends ChangeNotifier {
     return ids;
   }
 
+  /// Children of [motherAccountId] who already joined [chatId].
+  List<MaxAccount> childrenJoinedChat({
+    required String motherAccountId,
+    required String chatId,
+  }) {
+    final cluster = motherClusters.cast<MotherCluster?>().firstWhere(
+          (c) => c?.motherAccountId == motherAccountId,
+          orElse: () => null,
+        );
+    if (cluster == null || chatId.trim().isEmpty) return const [];
+    final out = <MaxAccount>[];
+    for (final id in cluster.childAccountIds) {
+      if (!membershipChatIdsFor(id).contains(chatId)) continue;
+      final a = accountById(id);
+      if (a != null) out.add(a);
+    }
+    return out;
+  }
+
+  int childCountForMother(String motherAccountId) {
+    for (final c in motherClusters) {
+      if (c.motherAccountId == motherAccountId) return c.childAccountIds.length;
+    }
+    return 0;
+  }
+
+  /// After join, replace synthetic `invite:$hash` catalog ids with real chatIds.
+  Future<void> remapCatalogFromJoinResults(List<Map<String, dynamic>> results) async {
+    if (results.isEmpty) return;
+    final byHash = <String, String>{}; // hash → chatId
+    final titles = <String, String>{};
+    for (final row in results) {
+      if (row['ok'] != true) continue;
+      final chatId = row['chatId']?.toString().trim() ?? '';
+      final hash = row['hash']?.toString().trim() ?? '';
+      if (chatId.isEmpty) continue;
+      if (MotherGroupChannel.isValidInviteHash(hash)) {
+        byHash[hash] = chatId;
+      }
+      final title = row['title']?.toString().trim() ?? '';
+      if (title.isNotEmpty) titles[chatId] = title;
+    }
+    if (byHash.isEmpty) return;
+
+    var changed = false;
+    final next = <MaxChannelCatalogEntry>[];
+    for (final e in channelCatalog) {
+      final hash = e.inviteHash?.trim();
+      final mapped = (hash != null && byHash.containsKey(hash)) ? byHash[hash]! : null;
+      if (mapped == null || mapped == e.chatId) {
+        next.add(e);
+        continue;
+      }
+      changed = true;
+      next.add(
+        e.copyWith(
+          chatId: mapped,
+          title: titles[mapped]?.isNotEmpty == true
+              ? titles[mapped]
+              : (e.title.startsWith('ссылка ') && titles[mapped] != null
+                  ? titles[mapped]
+                  : e.title),
+        ),
+      );
+    }
+    if (!changed) return;
+    // Dedupe if real chatId already existed.
+    final merged = MaxChannelCatalogEntry.mergeLists(const [], next);
+    await storage.saveChannelCatalog(merged);
+    notifyListeners();
+  }
+
+  /// Children join assigned catalog groups by invite links (Раздача / Запуск).
+  Future<({int joined, int slots, String message})> runPipelineChildrenJoinByLinks({
+    String? onlyMotherId,
+    Set<String>? onlyChatIds,
+    void Function(String message)? onLog,
+    ActionCancelToken? cancel,
+    String? actionId,
+  }) async {
+    void track(String msg) {
+      onLog?.call(msg);
+      if (actionId != null) updateActionProgress(actionId, message: msg);
+    }
+
+    final plan = buildPipelineLaunchPlan(
+      alreadyJoinedChatIds: joinedChatIdsForPipeline(),
+      onlyMotherId: onlyMotherId,
+      onlyChatIds: onlyChatIds,
+    );
+    if (!plan.ok) {
+      return (joined: 0, slots: 0, message: plan.error ?? 'План пуст');
+    }
+
+    var doneSlots = 0;
+    var joinedTotal = 0;
+    final allResults = <Map<String, dynamic>>[];
+
+    for (final slot in plan.slots) {
+      if (cancel?.isCancelled == true) break;
+
+      final withLink = slot.groups.where((g) => g.hasInviteLink).toList();
+      if (withLink.isEmpty) {
+        track('«${slot.child.label}»: нет ссылок — пропуск');
+        doneSlots++;
+        continue;
+      }
+
+      track(
+        '[${doneSlots + 1}/${plan.slots.length}] «${slot.child.label}» ← ${withLink.length} групп '
+        '(матка «${slot.mother.label}»)',
+      );
+
+      final groups = [
+        for (final g in withLink) {'chatId': g.chatId, 'hash': g.inviteHash},
+      ];
+      final links = [
+        for (final g in withLink)
+          if (g.inviteUrl != null) g.inviteUrl!,
+      ];
+      final childProxy = slot.child.isolation.proxyServer?.trim();
+      final childProxyOrNull =
+          (childProxy != null && childProxy.isNotEmpty) ? childProxy : null;
+
+      final result = await MaxMotherService.childrenJoin(
+        childTokens: [slot.child.apiToken!],
+        links: links,
+        groups: groups,
+        delayMs: rateSettings.motherJoinDelayMs,
+        proxy: childProxyOrNull,
+        childProxies: [childProxyOrNull],
+        onProgress: track,
+        cancel: cancel,
+      );
+
+      final okRows = result.results
+          .where((r) => r['ok'] == true && r['phase'] == 'child_join')
+          .length;
+      joinedTotal += result.joined > 0 ? result.joined : okRows;
+      allResults.addAll(result.results);
+
+      track(
+        result.ok
+            ? '«${slot.child.label}»: ${result.message}'
+            : '✗ «${slot.child.label}»: ${result.message}',
+      );
+
+      await recordMembershipsFromJoinResults(
+        motherAccountId: null,
+        children: [slot.child],
+        results: result.results,
+        titleByChatId: {for (final g in withLink) g.chatId: g.title},
+      );
+      await remapCatalogFromJoinResults(result.results);
+      await addPipelineJournal(
+        kind: PipelineJournalKind.joinLink,
+        message: result.joined > 0
+            ? '«${slot.child.label}»: вступило ${result.joined}/${withLink.length}'
+            : '«${slot.child.label}»: вступило 0/${withLink.length} — ${result.message}',
+        motherAccountId: slot.mother.id,
+        childAccountId: slot.child.id,
+      );
+
+      final template = joinTemplateForAccount(slot.child.id);
+      if (template != null && template.isActive && result.joined > 0) {
+        track('Письмо после входа: «${template.name}»');
+        final channelLinks = await ensureChannelInviteLinks(
+          [slot.child],
+          onLog: (msg, {String level = 'info'}) => track(msg),
+          cancel: cancel,
+        );
+        await ChildPostJoinRunner.runFromJoinResults(
+          tokenChildren: [slot.child],
+          joinResults: result.results,
+          templateFor: (_) => template,
+          channelLinkFor: (child) =>
+              channelLinks[child.id] ??
+              channelPolicyFor(child.id).lastCreatedInviteUrl,
+          onChatsSent: (child, chatIds, {messageIdsByChatId = const {}, titleByChatId = const {}}) =>
+              rememberTemplateSends(
+                child: child,
+                chatIds: chatIds,
+                templateId: template.id,
+                messageIdsByChatId: messageIdsByChatId,
+                titleByChatId: titleByChatId,
+              ),
+          onLog: (msg, {String level = 'info'}) => track(msg),
+          rateSettings: rateSettings,
+          cancel: cancel,
+        );
+        await addPipelineJournal(
+          kind: PipelineJournalKind.templateOnJoin,
+          message: '«${slot.child.label}» написал по шаблону «${template.name}»',
+          motherAccountId: slot.mother.id,
+          childAccountId: slot.child.id,
+        );
+      }
+
+      doneSlots++;
+      if (actionId != null) {
+        updateActionProgress(actionId, done: doneSlots, total: plan.slots.length);
+      }
+    }
+
+    final message = cancel?.isCancelled == true
+        ? 'Остановлено: слотов $doneSlots, вступлений $joinedTotal'
+        : 'Готово: слотов $doneSlots, вступлений $joinedTotal';
+    return (joined: joinedTotal, slots: doneSlots, message: message);
+  }
+
+  /// Mother joins by invite links, then invites children by viewerId (for accounts
+  /// that cannot join via link themselves — e.g. non-RU).
+  Future<({int invited, int mothers, String message})> runPipelineChildrenJoinById({
+    String? onlyMotherId,
+    Set<String>? onlyChatIds,
+    void Function(String message)? onLog,
+    ActionCancelToken? cancel,
+    String? actionId,
+  }) async {
+    void track(String msg) {
+      onLog?.call(msg);
+      if (actionId != null) updateActionProgress(actionId, message: msg);
+    }
+
+    final plan = buildPipelineLaunchPlan(
+      alreadyJoinedChatIds: joinedChatIdsForPipeline(),
+      onlyMotherId: onlyMotherId,
+      onlyChatIds: onlyChatIds,
+    );
+    if (!plan.ok) {
+      return (invited: 0, mothers: 0, message: plan.error ?? 'План пуст');
+    }
+
+    final byMother = <String, List<PipelineAssignSlot>>{};
+    for (final slot in plan.slots) {
+      byMother.putIfAbsent(slot.mother.id, () => []).add(slot);
+    }
+
+    var mothersDone = 0;
+    var invitedTotal = 0;
+
+    for (final entry in byMother.entries) {
+      if (cancel?.isCancelled == true) break;
+      final motherSlots = entry.value;
+      final mother = motherSlots.first.mother;
+
+      final unique = <String, MaxChannelCatalogEntry>{};
+      for (final slot in motherSlots) {
+        for (final g in slot.groups) {
+          unique[g.chatId] = g;
+        }
+      }
+      final uniqueGroups = unique.values.toList();
+
+      track('Матка «${mother.label}»: вступление в ${uniqueGroups.length} групп…');
+      final joinLinks = [
+        for (final g in uniqueGroups)
+          if (g.hasInviteLink) g.inviteUrl!,
+      ];
+      if (joinLinks.isEmpty) {
+        track('«${mother.label}»: нет ссылок для вступления');
+        mothersDone++;
+        continue;
+      }
+
+      final motherProxy = mother.isolation.proxyServer?.trim();
+      final motherProxyOrNull =
+          (motherProxy != null && motherProxy.isNotEmpty) ? motherProxy : null;
+
+      final joinResult = await MaxMotherService.joinGroups(
+        token: mother.apiToken!,
+        links: joinLinks,
+        delayMs: rateSettings.motherJoinDelayMs,
+        proxy: motherProxyOrNull,
+        onProgress: track,
+        cancel: cancel,
+      );
+
+      await recordMembershipsFromJoinResults(
+        motherAccountId: mother.id,
+        children: const [],
+        results: joinResult.results,
+        titleByChatId: {for (final g in uniqueGroups) g.chatId: g.title},
+      );
+      await remapCatalogFromJoinResults(joinResult.results);
+
+      // hash / synthetic catalog id → real chatId after mother join
+      final resolvedChatId = <String, String>{};
+      for (final row in joinResult.results) {
+        if (row['ok'] != true) continue;
+        final chatId = row['chatId']?.toString().trim() ?? '';
+        if (chatId.isEmpty) continue;
+        final hash = row['hash']?.toString().trim() ?? '';
+        if (MotherGroupChannel.isValidInviteHash(hash)) {
+          resolvedChatId[hash] = chatId;
+          resolvedChatId['invite:$hash'] = chatId;
+        }
+      }
+      for (final e in channelCatalog) {
+        if (e.hasInviteLink && !e.chatId.startsWith('invite:')) {
+          resolvedChatId[e.inviteHash!] = e.chatId;
+          resolvedChatId['invite:${e.inviteHash!}'] = e.chatId;
+        }
+      }
+
+      String? realChatIdFor(MaxChannelCatalogEntry g) {
+        if (g.chatId.isNotEmpty && !g.chatId.startsWith('invite:')) {
+          return g.chatId;
+        }
+        if (g.hasInviteLink && resolvedChatId.containsKey(g.inviteHash)) {
+          return resolvedChatId[g.inviteHash];
+        }
+        return resolvedChatId[g.chatId];
+      }
+
+      for (final slot in motherSlots) {
+        if (cancel?.isCancelled == true) break;
+        await ensureViewerId(slot.child);
+        final fresh = accountById(slot.child.id)!;
+        final viewerId = fresh.viewerId;
+        if (viewerId == null) {
+          track('«${slot.child.label}»: нет viewerId — пропуск invite');
+          continue;
+        }
+
+        final resolvedGroups = <MaxChannelCatalogEntry>[];
+        final chatIds = <String>[];
+        final groupsPayload = <Map<String, dynamic>>[];
+        for (final g in slot.groups) {
+          final chatId = realChatIdFor(g);
+          if (chatId == null || chatId.isEmpty) {
+            track('«${slot.child.label}»: нет chatId для «${g.title}» — пропуск');
+            continue;
+          }
+          resolvedGroups.add(g);
+          chatIds.add(chatId);
+          groupsPayload.add({
+            'chatId': chatId,
+            'title': g.title,
+            if (g.inviteHash != null) 'hash': g.inviteHash,
+          });
+        }
+        if (chatIds.isEmpty) {
+          track('«${slot.child.label}»: нечего приглашать');
+          continue;
+        }
+
+        track('Приглашение «${slot.child.label}» → ${chatIds.length} групп (по ID)');
+        final inviteResult = await MaxMotherService.inviteChildren(
+          motherToken: mother.apiToken!,
+          links: const [],
+          groups: groupsPayload,
+          chatIds: chatIds,
+          inviteUserIds: [viewerId],
+          delayMs: rateSettings.motherJoinDelayMs,
+          proxy: motherProxyOrNull,
+          onProgress: track,
+          cancel: cancel,
+        );
+        invitedTotal += inviteResult.invited;
+
+        await recordMembershipsFromJoinResults(
+          motherAccountId: mother.id,
+          children: [fresh],
+          results: inviteResult.results,
+          titleByChatId: {
+            for (var i = 0; i < resolvedGroups.length; i++)
+              chatIds[i]: resolvedGroups[i].title,
+          },
+        );
+        await addPipelineJournal(
+          kind: PipelineJournalKind.joinById,
+          message: '«${slot.child.label}»: приглашений ${inviteResult.invited}',
+          motherAccountId: mother.id,
+          childAccountId: slot.child.id,
+        );
+
+        final template = joinTemplateForAccount(slot.child.id);
+        if (template != null && template.isActive && inviteResult.invited > 0) {
+          final channelLinks = await ensureChannelInviteLinks(
+            [fresh],
+            onLog: (msg, {String level = 'info'}) => track(msg),
+            cancel: cancel,
+          );
+          await ChildPostJoinRunner.runPerAccountChats(
+            children: [fresh],
+            chatIdsByAccountId: {fresh.id: chatIds},
+            templateFor: (_) => template,
+            channelLinkFor: (child) =>
+                channelLinks[child.id] ??
+                channelPolicyFor(child.id).lastCreatedInviteUrl,
+            onChatsSent: (child, sentChatIds, {messageIdsByChatId = const {}, titleByChatId = const {}}) =>
+                rememberTemplateSends(
+                  child: child,
+                  chatIds: sentChatIds,
+                  templateId: template.id,
+                  messageIdsByChatId: messageIdsByChatId,
+                  titleByChatId: titleByChatId,
+                ),
+            onLog: (msg, {String level = 'info'}) => track(msg),
+            rateSettings: rateSettings,
+            cancel: cancel,
+          );
+        }
+      }
+
+      mothersDone++;
+      if (actionId != null) {
+        updateActionProgress(actionId, done: mothersDone, total: byMother.length);
+      }
+    }
+
+    final message = cancel?.isCancelled == true
+        ? 'Остановлено: маток $mothersDone, приглашений $invitedTotal'
+        : 'Готово (по ID): маток $mothersDone, приглашений $invitedTotal';
+    return (invited: invitedTotal, mothers: mothersDone, message: message);
+  }
+
   void _startDailyTemplateTicker() {
     _dailyTemplateTimer?.cancel();
     _dailyTemplateTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       unawaited(_tickDailyTemplates());
+      unawaited(_tickTemplateRepeats());
     });
+  }
+
+  Future<void> _tickTemplateRepeats() async {
+    if (templateBroadcastRunning) return;
+    final now = DateTime.now();
+    for (final template in joinMessageTemplates) {
+      if (!template.enabled || !template.repeatEnabled) continue;
+      if (!template.hasMessages) continue;
+      final interval = template.repeatIntervalMs;
+      if (interval < 60000) continue;
+      final last = _lastTemplateRepeatAt[template.id];
+      if (last == null) {
+        // Don't fire immediately on enable — wait one full interval.
+        _lastTemplateRepeatAt[template.id] = now;
+        continue;
+      }
+      if (now.difference(last).inMilliseconds < interval) continue;
+      _lastTemplateRepeatAt[template.id] = now;
+      browser.logMessage(
+        '[Шаблон] повтор «${template.name}» каждые '
+        '${(interval / 60000).toStringAsFixed(interval % 60000 == 0 ? 0 : 1)} мин',
+      );
+      try {
+        await broadcastTemplateToExistingGroups(
+          templateId: template.id,
+          refreshGroups: false,
+          scope: TemplateSendScope.all,
+        );
+      } catch (e) {
+        browser.logMessage('[Шаблон] повтор ошибка: $e', level: 'error');
+      }
+    }
   }
 
   Future<void> _tickDailyTemplates() async {
@@ -439,12 +1120,27 @@ class AppState extends ChangeNotifier {
     );
     try {
       final chatIdsByAccount = <String, List<String>>{};
+      var skipped = 0;
       for (final child in children) {
-        final chats = membershipsFor(child.id).map((m) => m.chatId).toList();
+        final chats = <String>[];
+        for (final m in membershipsFor(child.id)) {
+          if (storage.hasTemplateSent(
+            accountId: child.id,
+            chatId: m.chatId,
+            templateId: binding.templateId,
+          )) {
+            skipped += 1;
+            continue;
+          }
+          chats.add(m.chatId);
+        }
         if (chats.isNotEmpty) chatIdsByAccount[child.id] = chats;
       }
+      if (skipped > 0) {
+        browser.logMessage('[Шаблон] расписание: пропуск уже слали $skipped');
+      }
       if (chatIdsByAccount.isEmpty) {
-        finishAction(action.id, message: 'Нет вступивших каналов у дочек');
+        finishAction(action.id, message: 'Нет новых каналов у дочек');
         return;
       }
       final channelLinks = await ensureChannelInviteLinks(
@@ -461,6 +1157,14 @@ class AppState extends ChangeNotifier {
         templateFor: (_) => template,
         channelLinkFor: (child) =>
             channelLinks[child.id] ?? channelPolicyFor(child.id).lastCreatedInviteUrl,
+        onChatsSent: (child, chatIds, {messageIdsByChatId = const {}, titleByChatId = const {}}) =>
+            rememberTemplateSends(
+              child: child,
+              chatIds: chatIds,
+              templateId: binding.templateId,
+              messageIdsByChatId: messageIdsByChatId,
+              titleByChatId: titleByChatId,
+            ),
         onLog: (msg, {String level = 'info'}) {
           browser.logMessage(msg, level: level);
           updateActionProgress(action.id, message: msg);
@@ -778,7 +1482,9 @@ class AppState extends ChangeNotifier {
   Future<int> broadcastTemplateToExistingGroups({
     required String templateId,
     Iterable<String>? onlyAccountIds,
+    Set<String>? onlyChatIds,
     bool refreshGroups = true,
+    TemplateSendScope scope = TemplateSendScope.freshOnly,
   }) async {
     final template = joinMessageTemplateById(templateId);
     if (template == null || !template.isActive) {
@@ -820,14 +1526,17 @@ class AppState extends ChangeNotifier {
     final action = beginAction(
       kind: ActiveActionKind.postJoinMessage,
       title: 'Рассылка шаблона',
-      subtitle: '«${template.name}» · ${targetAccounts.length} акк.',
+      subtitle: '«${template.name}» · ${targetAccounts.length} акк. · ${scope.title}',
     );
     browser.logMessage(
-      '[Шаблон] «${template.name}» → ${targetAccounts.length} доч./акк. во все их каналы…',
+      '[Шаблон] «${template.name}» → ${targetAccounts.length} доч./акк. '
+      '(${scope.title})…',
     );
 
     try {
       final chatIdsByAccountId = <String, List<String>>{};
+      var skippedAlready = 0;
+      var skippedFresh = 0;
 
       for (final account in targetAccounts) {
         if (action.cancelToken.isCancelled) break;
@@ -889,6 +1598,25 @@ class AppState extends ChangeNotifier {
           }
         }
 
+        // Fallback: groups known for this child's mother (invite/join flow).
+        if (chatIds.isEmpty) {
+          final cluster = clusterContainingAccount(account.id);
+          final motherId = cluster?.motherAccountId;
+          if (motherId != null && motherId != account.id) {
+            final motherGroups = storage.motherGroupsFor(motherId);
+            chatIds = [
+              for (final g in motherGroups)
+                if (g.chatId.isNotEmpty) g.chatId,
+            ];
+            if (chatIds.isNotEmpty) {
+              browser.logMessage(
+                '[Шаблон] «${account.label}»: каналы матки «${accountById(motherId)?.label ?? motherId}» '
+                '(${chatIds.length})',
+              );
+            }
+          }
+        }
+
         if (chatIds.isEmpty) {
           browser.logMessage(
             '[Шаблон] «${account.label}»: нет каналов — пропуск',
@@ -896,15 +1624,68 @@ class AppState extends ChangeNotifier {
           );
           continue;
         }
-        chatIdsByAccountId[account.id] = chatIds;
+
+        final filtered = <String>[];
+        for (final chatId in chatIds) {
+          if (onlyChatIds != null &&
+              onlyChatIds.isNotEmpty &&
+              !onlyChatIds.contains(chatId)) {
+            continue;
+          }
+          final already = storage.hasTemplateSent(
+            accountId: account.id,
+            chatId: chatId,
+            templateId: templateId,
+          );
+          switch (scope) {
+            case TemplateSendScope.freshOnly:
+              if (already) {
+                skippedAlready += 1;
+              } else {
+                filtered.add(chatId);
+              }
+            case TemplateSendScope.alreadySentOnly:
+              if (already) {
+                filtered.add(chatId);
+              } else {
+                skippedFresh += 1;
+              }
+            case TemplateSendScope.all:
+              filtered.add(chatId);
+          }
+        }
+
+        if (filtered.isEmpty) {
+          browser.logMessage(
+            '[Шаблон] «${account.label}»: после фильтра (${scope.title}) 0 каналов',
+          );
+          continue;
+        }
+        chatIdsByAccountId[account.id] = filtered;
+        browser.logMessage(
+          '[Шаблон] «${account.label}»: к отправке ${filtered.length}'
+          '${scope == TemplateSendScope.freshOnly && skippedAlready > 0 ? ' (пропуск уже слали)' : ''}',
+        );
+      }
+
+      if (skippedAlready > 0) {
+        browser.logMessage('[Шаблон] пропущено уже слали: $skippedAlready');
+      }
+      if (skippedFresh > 0) {
+        browser.logMessage('[Шаблон] пропущено без истории: $skippedFresh');
       }
 
       if (chatIdsByAccountId.isEmpty) {
-        browser.logMessage('[Шаблон] некуда писать — каналы не найдены', level: 'warn');
+        browser.logMessage(
+          '[Шаблон] некуда писать — каналы не найдены / всё уже слали',
+          level: 'warn',
+        );
         finishAction(
           action.id,
           status: ActiveActionStatus.failed,
-          message: 'Каналы не найдены',
+          message: scope == TemplateSendScope.freshOnly
+              ? 'Нечего слать — всё уже отправлено'
+              : 'Каналы не найдены',
         );
         return 0;
       }
@@ -932,6 +1713,14 @@ class AppState extends ChangeNotifier {
         delayBeforeMs: 0,
         rateSettings: rateSettings,
         cancel: action.cancelToken,
+        onChatsSent: (child, chatIds, {messageIdsByChatId = const {}, titleByChatId = const {}}) =>
+            rememberTemplateSends(
+              child: child,
+              chatIds: chatIds,
+              templateId: templateId,
+              messageIdsByChatId: messageIdsByChatId,
+              titleByChatId: titleByChatId,
+            ),
         onLog: (msg, {String level = 'info'}) {
           browser.logMessage(msg, level: level);
           updateActionProgress(action.id, message: msg);
@@ -952,6 +1741,9 @@ class AppState extends ChangeNotifier {
       } else {
         finishAction(action.id, message: 'Отправлено сообщений: $sent');
         browser.logMessage('[Шаблон] готово: отправлено $sent');
+        if (template.repeatEnabled) {
+          _lastTemplateRepeatAt[templateId] = DateTime.now();
+        }
       }
       return sent;
     } catch (e) {
@@ -1091,6 +1883,20 @@ class AppState extends ChangeNotifier {
     await setAccountChannelPolicy(current.copyWith(canCreateChannels: value));
   }
 
+  /// Drop cached funnel channel so the next run creates a new one.
+  Future<void> clearAccountCreatedChannel(String accountId) async {
+    final current = channelPolicyFor(accountId);
+    if (current.lastCreatedChatId == null &&
+        current.lastCreatedInviteUrl == null &&
+        current.lastCreatedTitle == null) {
+      return;
+    }
+    await setAccountChannelPolicy(current.copyWith(clearLastCreated: true));
+    browser.logMessage(
+      '[Воронка] сброшен сохранённый канал у «${accountById(accountId)?.label ?? accountId}»',
+    );
+  }
+
   Future<void> setAccountFunnelIds(String accountId, Set<String> funnelIds) async {
     final current = channelPolicyFor(accountId);
     await setAccountChannelPolicy(current.copyWith(funnelIds: funnelIds));
@@ -1224,6 +2030,7 @@ class AppState extends ChangeNotifier {
         accounts: accounts,
         clusters: motherClusters,
         policyFor: channelPolicyFor,
+        savePolicy: setAccountChannelPolicy,
         accountIds: accountIds,
         onLog: (msg, {String level = 'info'}) => browser.logMessage(msg, level: level),
         cancel: action.cancelToken,

@@ -1,13 +1,20 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:uuid/uuid.dart';
 
 import '../models/account_map_state.dart';
+import '../models/app_nav_page.dart';
 import '../models/join_message_template.dart';
 import '../models/map_workflow.dart';
 import '../models/matka_template_binding.dart';
 import '../models/max_account.dart';
+import '../models/template_send_scope.dart';
 import '../providers/app_state.dart';
+import '../services/desktop_file_picker.dart';
+import 'post_forward_panel.dart';
+import 'template_channels_panel.dart';
 
 /// Unified place to create post-join message templates and assign them to accounts.
 class JoinTemplatesPanel extends StatefulWidget {
@@ -109,131 +116,18 @@ class _JoinTemplatesPanelState extends State<JoinTemplatesPanel> {
   }
 
   Future<void> _editMessages(JoinMessageTemplate template) async {
-    var delaySec = (template.delayMs / 1000).toStringAsFixed(
-      template.delayMs % 1000 == 0 ? 0 : 1,
-    );
-    final delayCtrl = TextEditingController(text: delaySec);
-    final controllers = <TextEditingController>[
-      for (final m in template.messages)
-        if (m.text.trim().isNotEmpty) TextEditingController(text: m.text),
-    ];
-    if (controllers.isEmpty) controllers.add(TextEditingController());
-    var enabled = template.enabled;
-
-    final saved = await showDialog<bool>(
+    final result = await showDialog<_TemplateMessagesEditResult>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) => AlertDialog(
-          title: Text('Сообщения · ${template.name}'),
-          content: SizedBox(
-            width: 440,
-            height: 460,
-            child: Column(
-              children: [
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  title: const Text('Включён', style: TextStyle(fontSize: 13)),
-                  value: enabled,
-                  onChanged: (v) => setLocal(() => enabled = v),
-                ),
-                TextField(
-                  controller: delayCtrl,
-                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                  decoration: const InputDecoration(
-                    labelText: 'Пауза после вступления (сек)',
-                    isDense: true,
-                    border: OutlineInputBorder(),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Expanded(
-                  child: ListView(
-                    children: [
-                      for (var i = 0; i < controllers.length; i++) ...[
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                controller: controllers[i],
-                                minLines: 2,
-                                maxLines: 5,
-                                decoration: InputDecoration(
-                                  labelText: 'Сообщение ${i + 1}',
-                                  hintText:
-                                      'Присоединяйся ➡️ [МОЙ КАНАЛ]({channel_link})',
-                                  helperText: i == 0
-                                      ? 'Ссылка: [текст](https://…) · канал воронки: {channel_link}'
-                                      : null,
-                                  helperMaxLines: 2,
-                                  isDense: true,
-                                  border: const OutlineInputBorder(),
-                                ),
-                              ),
-                            ),
-                            if (controllers.length > 1)
-                              IconButton(
-                                tooltip: 'Удалить',
-                                onPressed: () => setLocal(() {
-                                  controllers.removeAt(i).dispose();
-                                }),
-                                icon: const Icon(Icons.close, size: 18),
-                              ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                      ],
-                      Align(
-                        alignment: Alignment.centerLeft,
-                        child: TextButton.icon(
-                          onPressed: () => setLocal(() {
-                            controllers.add(TextEditingController());
-                          }),
-                          icon: const Icon(Icons.add, size: 16),
-                          label: const Text('Ещё сообщение'),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Сохранить')),
-          ],
-        ),
-      ),
+      builder: (ctx) => _TemplateChatEditorDialog(template: template),
     );
-
-    if (saved == true && mounted) {
-      final raw = delayCtrl.text.trim().replaceAll(',', '.');
-      final sec = double.tryParse(raw);
-      final delayMs = sec == null ? template.delayMs : (sec * 1000).round().clamp(200, 120000);
-      final messages = <BroadcastMessageStep>[
-        for (var i = 0; i < controllers.length; i++)
-          if (controllers[i].text.trim().isNotEmpty)
-            BroadcastMessageStep(
-              id: const Uuid().v4(),
-              text: controllers[i].text.trim(),
-              delayAfterMs: 3000,
-            ),
-      ];
-      await context.read<AppState>().updateJoinMessageTemplate(
-            template.copyWith(
-              messages: messages,
-              delayMs: delayMs,
-              enabled: enabled,
-            ),
-          );
-    }
-
-    delayCtrl.dispose();
-    for (final c in controllers) {
-      c.dispose();
-    }
+    if (result == null || !mounted) return;
+    await context.read<AppState>().updateJoinMessageTemplate(
+          template.copyWith(
+            messages: result.messages,
+            delayMs: result.delayMs,
+            enabled: result.enabled,
+          ),
+        );
   }
 
   Future<void> _applyToSelectedAccounts() async {
@@ -322,30 +216,114 @@ class _JoinTemplatesPanelState extends State<JoinTemplatesPanel> {
       return;
     }
 
-    final go = await showDialog<bool>(
+    final historyCount = state.countTemplateSentHistory(templateId);
+    var scope = TemplateSendScope.freshOnly;
+    final go = await showDialog<TemplateSendScope>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Написать во все каналы?'),
-        content: Text(
-          'Шаблон «${template.name}»\n'
-          'Дочерних аккаунтов: $withToken\n'
-          'Сообщений в шаблоне: ${template.messageCount}\n\n'
-          'Пишут только дочерние (и аккаунты без матки). '
-          'Матки в чаты не пишут.\n'
-          'Для каждого загрузятся его текущие группы/каналы '
-          'и туда уйдёт текст шаблона.',
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Отправить')),
-        ],
-      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setLocal) {
+            return AlertDialog(
+              title: const Text('Написать в каналы?'),
+              content: SizedBox(
+                width: 420,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      'Шаблон «${template.name}» · дочек: $withToken · '
+                      'сообщений: ${template.messageCount}\n'
+                      'В истории уже слали: $historyCount',
+                      style: const TextStyle(height: 1.35),
+                    ),
+                    const SizedBox(height: 12),
+                    for (final option in TemplateSendScope.values)
+                      RadioListTile<TemplateSendScope>(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        value: option,
+                        groupValue: scope,
+                        title: Text(option.title, style: const TextStyle(fontSize: 13)),
+                        subtitle: Text(
+                          option.subtitle,
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                        onChanged: (v) {
+                          if (v == null) return;
+                          setLocal(() => scope = v);
+                        },
+                      ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Выборочно по аккаунтам: отметьте дочек в списке слева/ниже '
+                      'перед запуском. Матки не пишут.',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                        height: 1.35,
+                      ),
+                    ),
+                    if (historyCount > 0) ...[
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed: () async {
+                            final ok = await showDialog<bool>(
+                              context: ctx,
+                              builder: (c2) => AlertDialog(
+                                title: const Text('Сбросить историю?'),
+                                content: Text(
+                                  'У шаблона «${template.name}» очистится список '
+                                  '«уже слали» ($historyCount). Потом снова можно '
+                                  'слать как в новые.',
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.pop(c2, false),
+                                    child: const Text('Отмена'),
+                                  ),
+                                  FilledButton(
+                                    onPressed: () => Navigator.pop(c2, true),
+                                    child: const Text('Сбросить'),
+                                  ),
+                                ],
+                              ),
+                            );
+                            if (ok == true) {
+                              await state.clearTemplateSentHistory(templateId);
+                              if (ctx.mounted) Navigator.pop(ctx);
+                            }
+                          },
+                          child: const Text('Сбросить историю отправок'),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Отмена'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(ctx, scope),
+                  child: const Text('Отправить'),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
-    if (go != true || !mounted) return;
+    if (go == null || !mounted) return;
 
     final sent = await state.broadcastTemplateToExistingGroups(
       templateId: templateId,
       onlyAccountIds: _selectedAccountIds.isNotEmpty ? _selectedAccountIds : null,
+      scope: go,
     );
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -379,7 +357,7 @@ class _JoinTemplatesPanelState extends State<JoinTemplatesPanel> {
               Text('Шаблоны', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
               SizedBox(height: 2),
               Text(
-                'Создайте шаблоны и привяжите к маткам: сразу после входа или ежедневно в HH:mm.',
+                'Шаблоны после вступления · вкладка «Посты» — смотреть ленту группы и пересылать в чаты.',
                 style: TextStyle(fontSize: 12, color: Colors.white60, height: 1.35),
               ),
             ],
@@ -404,6 +382,11 @@ class _JoinTemplatesPanelState extends State<JoinTemplatesPanel> {
                 label: Text('Аккаунты'),
                 icon: Icon(Icons.people_outline, size: 16),
               ),
+              ButtonSegment(
+                value: 3,
+                label: Text('Посты'),
+                icon: Icon(Icons.forward_to_inbox_outlined, size: 16),
+              ),
             ],
             selected: {_tabIndex},
             onSelectionChanged: (v) => setState(() => _tabIndex = v.first),
@@ -416,48 +399,51 @@ class _JoinTemplatesPanelState extends State<JoinTemplatesPanel> {
                   templates: state.joinMessageTemplates,
                   selectedId: _selectedTemplateId,
                   selected: template,
-                  broadcasting: state.templateBroadcastRunning,
                   onSelect: (id) => setState(() => _selectedTemplateId = id),
                   onAdd: _addTemplate,
                   onRename: _renameSelected,
                   onDelete: _deleteSelected,
-                  onEditMessages: template == null ? null : () => _editMessages(template),
+                  onEditMessages:
+                      template == null ? null : () => _editMessages(template),
                   onToggleEnabled: template == null
                       ? null
-                      : (v) => state.updateJoinMessageTemplate(template.copyWith(enabled: v)),
-                  onBroadcastAll: template == null || state.templateBroadcastRunning
-                      ? null
-                      : _broadcastSelectedToAllChannels,
+                      : (v) => state.updateJoinMessageTemplate(
+                            template.copyWith(enabled: v),
+                          ),
                 )
               : _tabIndex == 1
                   ? _MatkiBindingsTab(
                       state: state,
                       selectedTemplateId: _selectedTemplateId,
                     )
-                  : _AccountsTab(
-                  state: state,
-                  scheme: scheme,
-                  selectedTemplateId: _selectedTemplateId,
-                  selectedAccountIds: _selectedAccountIds,
-                  onToggleAccount: (id, selected) {
-                    setState(() {
-                      if (selected) {
-                        _selectedAccountIds.add(id);
-                      } else {
-                        _selectedAccountIds.remove(id);
-                      }
-                    });
-                  },
-                  onSelectAllVisible: (ids) => setState(() => _selectedAccountIds
-                    ..clear()
-                    ..addAll(ids)),
-                  onClearSelection: () => setState(() => _selectedAccountIds.clear()),
-                  onApplySelected: _applyToSelectedAccounts,
-                  onClearSelected: _clearSelectedAccounts,
-                  onApplyCluster: _applyToCluster,
-                  onPickTemplateForAccount: (accountId, templateId) =>
-                      state.setAccountJoinTemplate(accountId, templateId),
-                ),
+                  : _tabIndex == 2
+                      ? _AccountsTab(
+                          state: state,
+                          scheme: scheme,
+                          selectedTemplateId: _selectedTemplateId,
+                          selectedAccountIds: _selectedAccountIds,
+                          onToggleAccount: (id, selected) {
+                            setState(() {
+                              if (selected) {
+                                _selectedAccountIds.add(id);
+                              } else {
+                                _selectedAccountIds.remove(id);
+                              }
+                            });
+                          },
+                          onSelectAllVisible: (ids) => setState(() =>
+                              _selectedAccountIds
+                                ..clear()
+                                ..addAll(ids)),
+                          onClearSelection: () =>
+                              setState(() => _selectedAccountIds.clear()),
+                          onApplySelected: _applyToSelectedAccounts,
+                          onClearSelected: _clearSelectedAccounts,
+                          onApplyCluster: _applyToCluster,
+                          onPickTemplateForAccount: (accountId, templateId) =>
+                              state.setAccountJoinTemplate(accountId, templateId),
+                        )
+                      : const PostForwardPanel(),
         ),
       ],
     );
@@ -469,27 +455,23 @@ class _TemplatesTab extends StatelessWidget {
     required this.templates,
     required this.selectedId,
     required this.selected,
-    required this.broadcasting,
     required this.onSelect,
     required this.onAdd,
     required this.onRename,
     required this.onDelete,
     required this.onEditMessages,
     required this.onToggleEnabled,
-    required this.onBroadcastAll,
   });
 
   final List<JoinMessageTemplate> templates;
   final String? selectedId;
   final JoinMessageTemplate? selected;
-  final bool broadcasting;
   final ValueChanged<String> onSelect;
   final VoidCallback onAdd;
   final VoidCallback onRename;
   final VoidCallback onDelete;
   final VoidCallback? onEditMessages;
   final ValueChanged<bool>? onToggleEnabled;
-  final VoidCallback? onBroadcastAll;
 
   @override
   Widget build(BuildContext context) {
@@ -533,128 +515,75 @@ class _TemplatesTab extends StatelessWidget {
               ),
             ),
           )
-        else
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
-              children: [
-                SizedBox(
-                  height: 40,
-                  child: ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: templates.length,
-                    separatorBuilder: (_, __) => const SizedBox(width: 6),
-                    itemBuilder: (context, i) {
-                      final t = templates[i];
-                      final selectedChip = t.id == selectedId;
-                      return ChoiceChip(
-                        selected: selectedChip,
-                        label: Text(t.name, style: const TextStyle(fontSize: 12)),
-                        onSelected: (_) => onSelect(t.id),
-                        visualDensity: VisualDensity.compact,
-                      );
-                    },
-                  ),
-                ),
-                const SizedBox(height: 12),
-                if (selected != null) ...[
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  selected!.name,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 14,
-                                  ),
-                                ),
-                              ),
-                              Switch(
-                                value: selected!.enabled,
-                                onChanged: onToggleEnabled,
-                              ),
-                            ],
-                          ),
-                          Text(
-                            selected!.enabled
-                                ? 'Шаблон активен'
-                                : 'Выключен — аккаунты не будут писать',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: selected!.enabled
-                                  ? const Color(0xFFA5D6A7)
-                                  : Colors.white54,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'Пауза: ${(selected!.delayMs / 1000).toStringAsFixed(selected!.delayMs % 1000 == 0 ? 0 : 1)} сек · '
-                            'сообщений: ${selected!.messageCount}',
-                            style: const TextStyle(fontSize: 12, color: Colors.white70),
-                          ),
-                          const SizedBox(height: 10),
-                          if (!selected!.hasMessages)
-                            const Text(
-                              'Сообщения ещё не заданы.',
-                              style: TextStyle(fontSize: 12, color: Colors.orangeAccent),
-                            )
-                          else
-                            for (var i = 0; i < selected!.messages.length; i++)
-                              if (selected!.messages[i].text.trim().isNotEmpty)
-                                Padding(
-                                  padding: const EdgeInsets.only(bottom: 6),
-                                  child: Text(
-                                    '${i + 1}. ${selected!.messages[i].text}',
-                                    style: const TextStyle(fontSize: 12, height: 1.35),
-                                  ),
-                                ),
-                          const SizedBox(height: 8),
-                          FilledButton.icon(
-                            onPressed: onEditMessages,
-                            icon: const Icon(Icons.message_outlined, size: 18),
-                            label: const Text('Редактировать сообщения'),
-                          ),
-                          const SizedBox(height: 8),
-                          FilledButton.tonalIcon(
-                            onPressed: onBroadcastAll,
-                            icon: broadcasting
-                                ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(strokeWidth: 2),
-                                  )
-                                : const Icon(Icons.campaign_outlined, size: 18),
-                            label: Text(
-                              broadcasting
-                                  ? 'Рассылка…'
-                                  : 'Написать во все каналы',
-                            ),
-                          ),
-                        ],
+        else ...[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: SizedBox(
+              height: 40,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: templates.length,
+                separatorBuilder: (_, __) => const SizedBox(width: 6),
+                itemBuilder: (context, i) {
+                  final t = templates[i];
+                  final selectedChip = t.id == selectedId;
+                  return ChoiceChip(
+                    selected: selectedChip,
+                    label: Text(t.name, style: const TextStyle(fontSize: 12)),
+                    onSelected: (_) => onSelect(t.id),
+                    visualDensity: VisualDensity.compact,
+                  );
+                },
+              ),
+            ),
+          ),
+          if (selected != null) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      selected!.name,
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 14,
                       ),
                     ),
                   ),
-                  const SizedBox(height: 8),
                   Text(
-                    'После вступления — автоматически у дочерних. '
-                    '«Написать во все каналы» — дочки пишут во все группы, где уже состоят. '
-                    'Матки никогда не пишут. На вкладках «Матки» / «Аккаунты» — привязка; '
-                    'если отмечены галочки — рассылка только по ним.',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          fontSize: 11,
-                          color: Colors.white54,
-                        ),
+                    selected!.enabled ? 'Вкл' : 'Выкл',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: selected!.enabled
+                          ? const Color(0xFFA5D6A7)
+                          : Colors.white54,
+                    ),
+                  ),
+                  Switch(
+                    value: selected!.enabled,
+                    onChanged: onToggleEnabled,
                   ),
                 ],
-              ],
+              ),
             ),
-          ),
+            Expanded(
+              child: TemplateChannelsPanel(
+                key: ValueKey(selected!.id),
+                template: selected!,
+                onEditMessages: onEditMessages,
+              ),
+            ),
+          ] else
+            const Expanded(
+              child: Center(
+                child: Text(
+                  'Выберите шаблон',
+                  style: TextStyle(color: Colors.white54),
+                ),
+              ),
+            ),
+        ],
       ],
     );
   }
@@ -799,11 +728,31 @@ class _AccountsTab extends StatelessWidget {
                       onPickTemplate: (id) => onPickTemplateForAccount(childId, id),
                     ),
                 if (cluster.childAccountIds.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.fromLTRB(8, 0, 8, 8),
-                    child: Text(
-                      'В кластере пока нет дочерних — назначьте их во вкладке «Матка».',
-                      style: TextStyle(fontSize: 11, color: Colors.white54),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+                    child: Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 4,
+                      children: [
+                        const Text(
+                          'В кластере пока нет дочерних — назначьте вручную:',
+                          style: TextStyle(fontSize: 11, color: Colors.white54),
+                        ),
+                        TextButton(
+                          onPressed: () =>
+                              context.read<AppState>().setNavPage(AppNavPage.mother),
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 6),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          child: const Text(
+                            'Ещё → Матка',
+                            style: TextStyle(fontSize: 11),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 const SizedBox(height: 10),
@@ -1197,3 +1146,455 @@ class _MatkiBindingsTab extends StatelessWidget {
     );
   }
 }
+
+class _TemplateMessagesEditResult {
+  const _TemplateMessagesEditResult({
+    required this.messages,
+    required this.delayMs,
+    required this.enabled,
+  });
+
+  final List<BroadcastMessageStep> messages;
+  final int delayMs;
+  final bool enabled;
+}
+
+class _DraftBubble {
+  _DraftBubble({
+    required this.id,
+    required this.text,
+    this.mediaPath,
+    this.delayAfterMs = 3000,
+  });
+
+  final String id;
+  final TextEditingController text;
+  String? mediaPath;
+  int delayAfterMs;
+
+  void dispose() => text.dispose();
+}
+
+class _TemplateChatEditorDialog extends StatefulWidget {
+  const _TemplateChatEditorDialog({required this.template});
+
+  final JoinMessageTemplate template;
+
+  @override
+  State<_TemplateChatEditorDialog> createState() =>
+      _TemplateChatEditorDialogState();
+}
+
+class _TemplateChatEditorDialogState extends State<_TemplateChatEditorDialog> {
+  late final TextEditingController _delayCtrl;
+  late final TextEditingController _composerCtrl;
+  late bool _enabled;
+  final _drafts = <_DraftBubble>[];
+  String? _composerMedia;
+  final _scroll = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    final t = widget.template;
+    _enabled = t.enabled;
+    _delayCtrl = TextEditingController(
+      text: (t.delayMs / 1000).toStringAsFixed(t.delayMs % 1000 == 0 ? 0 : 1),
+    );
+    _composerCtrl = TextEditingController();
+    for (final m in t.messages) {
+      if (!m.hasContent) continue;
+      _drafts.add(
+        _DraftBubble(
+          id: m.id,
+          text: TextEditingController(text: m.text),
+          mediaPath: m.mediaPath,
+          delayAfterMs: m.delayAfterMs,
+        ),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _delayCtrl.dispose();
+    _composerCtrl.dispose();
+    _scroll.dispose();
+    for (final d in _drafts) {
+      d.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> _pickComposerPhoto() async {
+    final path = await DesktopFilePicker.pickImage(title: 'Фото к сообщению');
+    if (path != null && mounted) setState(() => _composerMedia = path);
+  }
+
+  Future<void> _pickBubblePhoto(int index) async {
+    final path = await DesktopFilePicker.pickImage(title: 'Фото к сообщению');
+    if (path != null && mounted) {
+      setState(() => _drafts[index].mediaPath = path);
+    }
+  }
+
+  void _addFromComposer() {
+    final text = _composerCtrl.text.trim();
+    final media = _composerMedia?.trim();
+    if (text.isEmpty && (media == null || media.isEmpty)) return;
+    setState(() {
+      _drafts.add(
+        _DraftBubble(
+          id: const Uuid().v4(),
+          text: TextEditingController(text: text),
+          mediaPath: media,
+        ),
+      );
+      _composerCtrl.clear();
+      _composerMedia = null;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scroll.hasClients) return;
+      _scroll.animateTo(
+        _scroll.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  void _save() {
+    final pendingText = _composerCtrl.text.trim();
+    final pendingMedia = _composerMedia?.trim();
+    if (pendingText.isNotEmpty ||
+        (pendingMedia != null && pendingMedia.isNotEmpty)) {
+      _drafts.add(
+        _DraftBubble(
+          id: const Uuid().v4(),
+          text: TextEditingController(text: pendingText),
+          mediaPath: pendingMedia,
+        ),
+      );
+      _composerCtrl.clear();
+      _composerMedia = null;
+    }
+
+    final raw = _delayCtrl.text.trim().replaceAll(',', '.');
+    final sec = double.tryParse(raw);
+    final delayMs = sec == null
+        ? widget.template.delayMs
+        : (sec * 1000).round().clamp(200, 120000);
+    final messages = <BroadcastMessageStep>[
+      for (final d in _drafts)
+        if (d.text.text.trim().isNotEmpty ||
+            (d.mediaPath != null && d.mediaPath!.trim().isNotEmpty))
+          BroadcastMessageStep(
+            id: d.id,
+            text: d.text.text.trim(),
+            delayAfterMs: d.delayAfterMs,
+            mediaPath: d.mediaPath,
+          ),
+    ];
+    Navigator.pop(
+      context,
+      _TemplateMessagesEditResult(
+        messages: messages,
+        delayMs: delayMs,
+        enabled: _enabled,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final bubbleColor = scheme.primaryContainer.withValues(alpha: 0.55);
+    final composerReady = _composerCtrl.text.trim().isNotEmpty ||
+        (_composerMedia != null && _composerMedia!.trim().isNotEmpty);
+
+    return AlertDialog(
+      title: Text('Чат · ${widget.template.name}'),
+      content: SizedBox(
+        width: 460,
+        height: 520,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    title: const Text('Включён', style: TextStyle(fontSize: 13)),
+                    value: _enabled,
+                    onChanged: (v) => setState(() => _enabled = v),
+                  ),
+                ),
+                SizedBox(
+                  width: 120,
+                  child: TextField(
+                    controller: _delayCtrl,
+                    keyboardType:
+                        const TextInputType.numberWithOptions(decimal: true),
+                    decoration: const InputDecoration(
+                      labelText: 'Пауза сек',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Ссылка: [текст](https://…) · канал воронки: {channel_link}',
+              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerHighest.withValues(alpha: 0.35),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: scheme.outlineVariant.withValues(alpha: 0.4),
+                  ),
+                ),
+                child: _drafts.isEmpty
+                    ? Center(
+                        child: Text(
+                          'Пока пусто — напишите ниже\nи добавьте фото при желании',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 13,
+                            color: scheme.onSurfaceVariant,
+                            height: 1.35,
+                          ),
+                        ),
+                      )
+                    : ListView.builder(
+                        controller: _scroll,
+                        padding: const EdgeInsets.fromLTRB(10, 12, 10, 12),
+                        itemCount: _drafts.length,
+                        itemBuilder: (context, index) {
+                          final d = _drafts[index];
+                          final media = d.mediaPath;
+                          final mediaOk =
+                              media != null && File(media).existsSync();
+                          return Align(
+                            alignment: Alignment.centerRight,
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(maxWidth: 340),
+                              child: Container(
+                                margin: const EdgeInsets.only(bottom: 10),
+                                padding: const EdgeInsets.fromLTRB(10, 8, 6, 8),
+                                decoration: BoxDecoration(
+                                  color: bubbleColor,
+                                  borderRadius: const BorderRadius.only(
+                                    topLeft: Radius.circular(14),
+                                    topRight: Radius.circular(14),
+                                    bottomLeft: Radius.circular(14),
+                                    bottomRight: Radius.circular(4),
+                                  ),
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Text(
+                                          'Сообщение ${index + 1}',
+                                          style: TextStyle(
+                                            fontSize: 10,
+                                            color: scheme.onPrimaryContainer
+                                                .withValues(alpha: 0.7),
+                                          ),
+                                        ),
+                                        const Spacer(),
+                                        IconButton(
+                                          tooltip: 'Фото',
+                                          visualDensity: VisualDensity.compact,
+                                          onPressed: () => _pickBubblePhoto(index),
+                                          icon: const Icon(
+                                            Icons.photo_outlined,
+                                            size: 16,
+                                          ),
+                                        ),
+                                        IconButton(
+                                          tooltip: 'Удалить',
+                                          visualDensity: VisualDensity.compact,
+                                          onPressed: () => setState(() {
+                                            _drafts.removeAt(index).dispose();
+                                          }),
+                                          icon: const Icon(Icons.close, size: 16),
+                                        ),
+                                      ],
+                                    ),
+                                    if (mediaOk)
+                                      Padding(
+                                        padding: const EdgeInsets.only(bottom: 6),
+                                        child: ClipRRect(
+                                          borderRadius: BorderRadius.circular(8),
+                                          child: Stack(
+                                            children: [
+                                              Image.file(
+                                                File(media),
+                                                height: 140,
+                                                width: double.infinity,
+                                                fit: BoxFit.cover,
+                                              ),
+                                              Positioned(
+                                                top: 4,
+                                                right: 4,
+                                                child: Material(
+                                                  color: Colors.black54,
+                                                  shape: const CircleBorder(),
+                                                  child: InkWell(
+                                                    customBorder:
+                                                        const CircleBorder(),
+                                                    onTap: () => setState(
+                                                      () => d.mediaPath = null,
+                                                    ),
+                                                    child: const Padding(
+                                                      padding: EdgeInsets.all(4),
+                                                      child: Icon(
+                                                        Icons.close,
+                                                        size: 14,
+                                                        color: Colors.white,
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      )
+                                    else if (media != null)
+                                      Padding(
+                                        padding:
+                                            const EdgeInsets.only(bottom: 6),
+                                        child: Text(
+                                          'Файл не найден: $media',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: scheme.error,
+                                          ),
+                                        ),
+                                      ),
+                                    TextField(
+                                      controller: d.text,
+                                      minLines: 1,
+                                      maxLines: 6,
+                                      style: const TextStyle(fontSize: 13),
+                                      decoration: const InputDecoration(
+                                        hintText: 'Текст сообщения…',
+                                        isDense: true,
+                                        border: InputBorder.none,
+                                        contentPadding: EdgeInsets.zero,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            if (_composerMedia != null) ...[
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Stack(
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.file(
+                        File(_composerMedia!),
+                        height: 72,
+                        width: 72,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => Container(
+                          height: 72,
+                          width: 72,
+                          color: scheme.errorContainer,
+                          child: const Icon(Icons.broken_image_outlined),
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      top: 2,
+                      right: 2,
+                      child: Material(
+                        color: Colors.black54,
+                        shape: const CircleBorder(),
+                        child: InkWell(
+                          customBorder: const CircleBorder(),
+                          onTap: () => setState(() => _composerMedia = null),
+                          child: const Padding(
+                            padding: EdgeInsets.all(3),
+                            child: Icon(Icons.close, size: 12, color: Colors.white),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 6),
+            ],
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                IconButton(
+                  tooltip: 'Прикрепить фото',
+                  onPressed: _pickComposerPhoto,
+                  icon: Icon(
+                    Icons.photo_outlined,
+                    color: _composerMedia != null
+                        ? scheme.primary
+                        : scheme.onSurfaceVariant,
+                  ),
+                ),
+                Expanded(
+                  child: TextField(
+                    controller: _composerCtrl,
+                    minLines: 1,
+                    maxLines: 4,
+                    onChanged: (_) => setState(() {}),
+                    onSubmitted: (_) => _addFromComposer(),
+                    decoration: const InputDecoration(
+                      hintText: 'Новое сообщение…',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                IconButton.filled(
+                  tooltip: 'Добавить в чат',
+                  onPressed: composerReady ? _addFromComposer : null,
+                  icon: const Icon(Icons.send_rounded, size: 18),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Отмена'),
+        ),
+        FilledButton(
+          onPressed: _save,
+          child: const Text('Сохранить'),
+        ),
+      ],
+    );
+  }
+}
+
