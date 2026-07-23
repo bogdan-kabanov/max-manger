@@ -41,31 +41,37 @@ class MotherInviteMotherSummary {
   final List<MaxAccount> children;
 }
 
-/// Proportional uzb → mothers (≤[invitesPerMother]) → groups.
+/// Proportional children → mothers (≤[invitesPerMother]) → groups.
 class MotherInvitePlan {
   const MotherInvitePlan({
     required this.slots,
     required this.motherSummaries,
-    required this.uzbekTotal,
-    required this.uzbekAssigned,
-    required this.uzbekSkipped,
+    required this.childTotal,
+    required this.childAssigned,
+    required this.childSkipped,
     required this.invitesPerMother,
     required this.mothersReady,
     required this.mothersWithoutGroups,
-    required this.uzbekWithoutViewerId,
+    required this.childWithoutViewerId,
     this.error,
   });
 
   final List<MotherInviteSlot> slots;
   final List<MotherInviteMotherSummary> motherSummaries;
-  final int uzbekTotal;
-  final int uzbekAssigned;
-  final int uzbekSkipped;
+  final int childTotal;
+  final int childAssigned;
+  final int childSkipped;
   final int invitesPerMother;
   final int mothersReady;
   final int mothersWithoutGroups;
-  final int uzbekWithoutViewerId;
+  final int childWithoutViewerId;
   final String? error;
+
+  /// Legacy aliases used by older call sites / tests.
+  int get uzbekTotal => childTotal;
+  int get uzbekAssigned => childAssigned;
+  int get uzbekSkipped => childSkipped;
+  int get uzbekWithoutViewerId => childWithoutViewerId;
 
   int get totalInvites => slots.fold(0, (sum, s) => sum + s.inviteCount);
   int get capacity => mothersReady * invitesPerMother;
@@ -74,10 +80,10 @@ class MotherInvitePlan {
 
   String get summaryLine {
     if (error != null) return error!;
-    return 'Маток: $mothersReady · Узб: $uzbekTotal → в план: $uzbekAssigned'
+    return 'Маток: $mothersReady · Акков: $childTotal → в план: $childAssigned'
         ' (лимит $invitesPerMother/матка, ёмкость $capacity)'
-        '${uzbekSkipped > 0 ? ' · не влезло: $uzbekSkipped' : ''}'
-        '${uzbekWithoutViewerId > 0 ? ' · без id: $uzbekWithoutViewerId' : ''}';
+        '${childSkipped > 0 ? ' · не влезло: $childSkipped' : ''}'
+        '${childWithoutViewerId > 0 ? ' · без id: $childWithoutViewerId' : ''}';
   }
 }
 
@@ -141,44 +147,48 @@ class MotherInvitePlanner {
       return MotherInvitePlan(
         slots: const [],
         motherSummaries: const [],
-        uzbekTotal: 0,
-        uzbekAssigned: 0,
-        uzbekSkipped: 0,
+        childTotal: 0,
+        childAssigned: 0,
+        childSkipped: 0,
         invitesPerMother: invitesPerMother,
         mothersReady: 0,
         mothersWithoutGroups: withoutGroups,
-        uzbekWithoutViewerId: 0,
+        childWithoutViewerId: 0,
         error: withoutGroups > 0
             ? 'Сначала загрузите каналы маток'
             : 'Нет готовых маток (нужен токен и каналы)',
       );
     }
 
-    final motherIds = ready.map((r) => r.mother.id).toSet();
-    final uzbekAll = accounts.where((a) => !motherIds.contains(a.id) && a.isUzbek).toList();
-    final uzbekReady = uzbekAll.where((a) => a.viewerId != null).toList();
-    final withoutViewer = uzbekAll.length - uzbekReady.length;
+    // All designated mothers (even without groups yet) stay out of the child pool.
+    final motherIds = {
+      for (final cluster in clusters)
+        if (cluster.motherAccountId != null) cluster.motherAccountId!,
+    };
+    final childrenAll = accounts.where((a) => !motherIds.contains(a.id)).toList();
+    final childrenReady = childrenAll.where((a) => a.viewerId != null).toList();
+    final withoutViewer = childrenAll.length - childrenReady.length;
 
-    if (uzbekReady.isEmpty) {
+    if (childrenReady.isEmpty) {
       return MotherInvitePlan(
         slots: const [],
         motherSummaries: const [],
-        uzbekTotal: uzbekAll.length,
-        uzbekAssigned: 0,
-        uzbekSkipped: 0,
+        childTotal: childrenAll.length,
+        childAssigned: 0,
+        childSkipped: 0,
         invitesPerMother: invitesPerMother,
         mothersReady: ready.length,
         mothersWithoutGroups: withoutGroups,
-        uzbekWithoutViewerId: withoutViewer,
-        error: uzbekAll.isEmpty
-            ? 'Нет узб-аккаунтов (+998 или «узб» в названии)'
-            : 'У узб-аккаунтов нет viewer id — откройте их и возьмите токен',
+        childWithoutViewerId: withoutViewer,
+        error: childrenAll.isEmpty
+            ? 'Нет аккаунтов для распределения (все назначены матками)'
+            : 'У аккаунтов нет viewer id — откройте их и возьмите токен',
       );
     }
 
-    final chunks = splitEvenlyCapped(uzbekReady, ready.length, invitesPerMother);
+    final chunks = splitEvenlyCapped(childrenReady, ready.length, invitesPerMother);
     final assigned = chunks.fold<int>(0, (s, c) => s + c.length);
-    final skipped = uzbekReady.length - assigned;
+    final skipped = childrenReady.length - assigned;
 
     final slots = <MotherInviteSlot>[];
     final summaries = <MotherInviteMotherSummary>[];
@@ -234,13 +244,13 @@ class MotherInvitePlanner {
     return MotherInvitePlan(
       slots: slots,
       motherSummaries: summaries,
-      uzbekTotal: uzbekAll.length,
-      uzbekAssigned: assigned,
-      uzbekSkipped: skipped,
+      childTotal: childrenAll.length,
+      childAssigned: assigned,
+      childSkipped: skipped,
       invitesPerMother: invitesPerMother,
       mothersReady: ready.length,
       mothersWithoutGroups: withoutGroups,
-      uzbekWithoutViewerId: withoutViewer,
+      childWithoutViewerId: withoutViewer,
     );
   }
 }

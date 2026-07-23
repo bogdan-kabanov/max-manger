@@ -390,6 +390,22 @@ class _MapToolbar extends StatelessWidget {
             color: linkMode ? Theme.of(context).colorScheme.primary : null,
           ),
           const Spacer(),
+          if (state.accountMap.edgesFromClusters().isNotEmpty) ...[
+            Container(
+              width: 10,
+              height: 3,
+              decoration: BoxDecoration(
+                color: const Color(0xFFFF9800),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              'матка→доч. ${state.accountMap.edgesFromClusters().length}',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: const Color(0xFFFF9800)),
+            ),
+            const SizedBox(width: 10),
+          ],
           Text(
             '${state.accounts.length} акк. · ${state.workflowNodes.length} блоков',
             style: Theme.of(context).textTheme.bodySmall,

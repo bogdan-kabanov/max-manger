@@ -15,6 +15,9 @@ class MaxAuthResult {
     this.token,
     this.phone,
     this.profileName,
+    this.profileFirstName,
+    this.profileLastName,
+    this.profileDescription,
     this.profilePhone,
     this.profileId,
   });
@@ -29,6 +32,9 @@ class MaxAuthResult {
   final String? token;
   final String? phone;
   final String? profileName;
+  final String? profileFirstName;
+  final String? profileLastName;
+  final String? profileDescription;
   final String? profilePhone;
   final int? profileId;
 
@@ -50,6 +56,9 @@ class MaxAuthResult {
       token: _asString(json['token']),
       phone: _asString(json['phone']),
       profileName: _asString(profile?['name']),
+      profileFirstName: _asString(profile?['firstName']),
+      profileLastName: _asString(profile?['lastName']),
+      profileDescription: _asString(profile?['description']),
       profilePhone: _asString(profile?['phone']),
       profileId: _asInt(profile?['id']),
     );
@@ -146,6 +155,9 @@ class MaxAuthService {
         token: parsed.token,
         phone: parsed.phone,
         profileName: parsed.profileName,
+        profileFirstName: parsed.profileFirstName,
+        profileLastName: parsed.profileLastName,
+        profileDescription: parsed.profileDescription,
         profilePhone: parsed.profilePhone,
         profileId: parsed.profileId,
       );

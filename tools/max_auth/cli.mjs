@@ -1,5 +1,6 @@
-import { MaxClient, inviteUsers, resolveGroupByLink, addContact, OPCODES, generateRandomId } from '@mqpanda/vkmax-node';
+import { MaxClient, inviteUsers, resolveGroupByLink, addContact, createChannel, OPCODES, generateRandomId } from '@mqpanda/vkmax-node';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fail, ok, mapMaxAuthError } from './errors.mjs';
@@ -43,19 +44,50 @@ function extractToken(payload) {
 
 function asString(value) {
   if (value == null) return undefined;
-  return String(value);
+  const text = String(value).trim();
+  return text.length > 0 ? text : undefined;
+}
+
+function pickNameEntry(names) {
+  if (!Array.isArray(names) || names.length === 0) return null;
+  return names.find((n) => n && (n.type === 'ONEME' || n.type === 'CUSTOM')) ?? names[0];
 }
 
 function extractProfile(payload) {
   const profile = payload?.profile ?? {};
   const contact = profile.contact ?? profile;
-  const names = contact.names;
-  const name = Array.isArray(names) ? names[0]?.name : contact.name;
-  const phone = asString(contact.phone ?? profile.phone);
+  const entry = pickNameEntry(contact.names);
+  let firstName = asString(entry?.firstName ?? contact.firstName);
+  let lastName = asString(entry?.lastName ?? contact.lastName);
+  const displayName = asString(entry?.name ?? contact.name);
+  // MAX often returns only `name` (e.g. «Илья») without firstName/lastName split.
+  if (!firstName && displayName) {
+    const parts = displayName.split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      firstName = parts[0];
+      lastName = lastName ?? parts.slice(1).join(' ');
+    } else {
+      firstName = displayName;
+    }
+  }
+  const composed = [firstName, lastName].filter(Boolean).join(' ');
+  const name = displayName ?? (composed || undefined);
+  const phoneRaw = contact.phone ?? profile.phone ?? payload?.phone;
+  const phone = asString(phoneRaw);
+  const description = asString(
+    contact.description ??
+      profile.description ??
+      contact.about ??
+      profile.about ??
+      entry?.description,
+  );
   return {
-    name: asString(name) ?? phone,
+    name: name ?? phone,
+    firstName,
+    lastName,
+    description,
     phone,
-    id: contact.id,
+    id: contact.id ?? profile.id,
   };
 }
 
@@ -141,6 +173,32 @@ async function cmdVerify2FA(phone, password) {
   }
 }
 
+async function enrichProfileFromContacts(client, profile) {
+  if (!profile?.id) return profile;
+  try {
+    const response = await client.invokeMethod(32, { contactIds: [profile.id] });
+    const payload = response?.payload ?? {};
+    const contacts = payload.contacts ?? payload.contact ?? null;
+    let contact = null;
+    if (Array.isArray(contacts) && contacts.length > 0) contact = contacts[0];
+    else if (contacts && typeof contacts === 'object' && !Array.isArray(contacts)) contact = contacts;
+    else if (payload.contact) contact = payload.contact;
+    if (!contact) return profile;
+    const enriched = extractProfile({ profile: { contact } });
+    return {
+      ...profile,
+      name: enriched.name ?? profile.name,
+      firstName: enriched.firstName ?? profile.firstName,
+      lastName: enriched.lastName ?? profile.lastName,
+      description: enriched.description ?? profile.description,
+      phone: enriched.phone ?? profile.phone,
+      id: enriched.id ?? profile.id,
+    };
+  } catch (_) {
+    return profile;
+  }
+}
+
 async function cmdLoginToken(token, proxy) {
   try {
     const used = applyProxy(proxy);
@@ -156,7 +214,8 @@ async function cmdLoginToken(token, proxy) {
     const payload = response.payload ?? {};
     if (payload.error) fail(mapMaxAuthError(payload), { code: payload.error });
 
-    const profile = extractProfile(payload);
+    let profile = extractProfile(payload);
+    profile = await enrichProfileFromContacts(client, profile);
     ok({ token, profile, phone: profile.phone });
   } finally {
     await client.disconnect().catch(() => undefined);
@@ -308,6 +367,122 @@ function extractHashFromChatObject(chat) {
     if (hash) return hash;
   }
   return null;
+}
+
+function decodeHtmlEntities(text) {
+  return String(text ?? '')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ');
+}
+
+/** External public chat directory (max-catalog.com WP REST). Group chats are invite-only in MAX. */
+async function fetchMaxCatalogChatPage({ page = 1, perPage = 100, search = '' } = {}) {
+  const params = new URLSearchParams({
+    per_page: String(Math.max(1, Math.min(Number(perPage) || 100, 100))),
+    page: String(Math.max(1, Number(page) || 1)),
+    _fields: 'id,slug,title,acf',
+  });
+  const q = String(search ?? '').trim();
+  if (q) params.set('search', q);
+
+  const url = `https://max-catalog.com/wp-json/wp/v2/chat?${params.toString()}`;
+  const response = await fetch(url, {
+    headers: {
+      Accept: 'application/json',
+      'User-Agent': 'MAX-Desktop/1.0 (catalog-import)',
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`max-catalog HTTP ${response.status}`);
+  }
+  const items = await response.json();
+  if (!Array.isArray(items)) {
+    throw new Error('max-catalog: неожиданный ответ');
+  }
+  const candidates = [];
+  for (const item of items) {
+    const link = item?.acf?.chat_link ?? item?.acf?.link ?? '';
+    const hash = parseJoinHash(link);
+    if (!hash) continue;
+    candidates.push({
+      hash,
+      title: decodeHtmlEntities(item?.title?.rendered ?? item?.slug ?? hash),
+      type: null,
+      chatId: null,
+      source: 'max-catalog',
+    });
+  }
+  return {
+    candidates,
+    total: Number(response.headers.get('x-wp-total') || 0),
+    totalPages: Number(response.headers.get('x-wp-totalpages') || 1),
+  };
+}
+
+async function collectMaxCatalogChatCandidates({
+  topics = [],
+  target = 30,
+  excludeHashes = new Set(),
+  onProgress = () => undefined,
+} = {}) {
+  const want = Math.max(target * 4, 40);
+  const collected = [];
+  const seen = new Set();
+
+  function pushAll(list) {
+    for (const c of list) {
+      if (!c?.hash || seen.has(c.hash) || excludeHashes.has(c.hash)) continue;
+      seen.add(c.hash);
+      collected.push(c);
+    }
+  }
+
+  const queries = topics.length > 0 ? topics : [''];
+  for (const query of queries) {
+    if (collected.length >= want) break;
+    try {
+      const first = await fetchMaxCatalogChatPage({ page: 1, perPage: 100, search: query });
+      onProgress(
+        query
+          ? `[Каталог web] «${query}»: ${first.total || first.candidates.length} чатов на max-catalog.com`
+          : `[Каталог web] на max-catalog.com: ${first.total || first.candidates.length} чатов`,
+      );
+      pushAll(first.candidates);
+
+      const totalPages = Math.max(1, first.totalPages || 1);
+      if (query) {
+        // Keyword: take a couple more pages of search hits.
+        for (let page = 2; page <= Math.min(totalPages, 3) && collected.length < want; page++) {
+          const next = await fetchMaxCatalogChatPage({ page, perPage: 100, search: query });
+          pushAll(next.candidates);
+          await sleep(120);
+        }
+      } else {
+        // Open: random pages so repeats don't always start from the same chats.
+        const pagePool = [];
+        for (let p = 2; p <= totalPages; p++) pagePool.push(p);
+        pagePool.sort(() => Math.random() - 0.5);
+        const extra = Math.min(pagePool.length, Math.max(2, Math.ceil(want / 100)));
+        for (let i = 0; i < extra && collected.length < want; i++) {
+          const next = await fetchMaxCatalogChatPage({ page: pagePool[i], perPage: 100 });
+          pushAll(next.candidates);
+          onProgress(`[Каталог web] страница ${pagePool[i]}/${totalPages} → кандидатов: ${collected.length}`);
+          await sleep(120);
+        }
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      onProgress(`[Каталог web] ошибка загрузки: ${message}`, 'warn');
+    }
+  }
+
+  collected.sort(() => Math.random() - 0.5);
+  return collected;
 }
 
 function normalizeChatId(chatId) {
@@ -514,6 +689,17 @@ function isGroupLikeChat(chat) {
   return type.includes('CHAT') || type.includes('GROUP') || type.includes('CHANNEL');
 }
 
+/** kind: 'chats' | 'channels' | 'all' — CHAT = можно писать, CHANNEL = лента для подписчиков */
+function matchesDiscoverKind(type, kind = 'all') {
+  const t = String(type ?? '').toUpperCase();
+  if (!t || t === 'DIALOG') return false;
+  const isChannel = t.includes('CHANNEL');
+  const isChat = t.includes('CHAT') || t.includes('GROUP');
+  if (kind === 'chats') return isChat && !isChannel;
+  if (kind === 'channels') return isChannel;
+  return isChat || isChannel;
+}
+
 async function findInviteHashInChat(client, chatId, backward = 160) {
   const response = await client.invokeMethod(OPCODES.GET_MESSAGES, {
     chatId,
@@ -635,6 +821,48 @@ function parseHashes(links) {
 
 function joinUrl(hash) {
   return `https://max.ru/join/${hash}`;
+}
+
+/** Markdown-style links: `[label](https://…)` → plain text + LINK elements. */
+function parseMessageWithLinks(raw) {
+  const input = String(raw ?? '');
+  if (!input || !input.includes('](')) {
+    return { text: input, elements: [] };
+  }
+  const linkRe = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
+  let text = '';
+  const elements = [];
+  let last = 0;
+  let match;
+  while ((match = linkRe.exec(input)) !== null) {
+    text += input.slice(last, match.index);
+    const label = match[1];
+    const url = match[2];
+    const from = text.length;
+    text += label;
+    elements.push({
+      type: 'LINK',
+      from,
+      length: label.length,
+      attributes: { url },
+    });
+    last = match.index + match[0].length;
+  }
+  text += input.slice(last);
+  return { text, elements };
+}
+
+function buildTextMessagePayload(rawText) {
+  const parsed = parseMessageWithLinks(rawText);
+  const message = {
+    text: parsed.text,
+    cid: generateRandomId(),
+    attaches: [],
+  };
+  if (parsed.elements.length > 0) {
+    message.elements = parsed.elements;
+  }
+  return message;
 }
 
 async function sendInviteLinkToUser(client, userId, hash) {
@@ -1313,18 +1541,57 @@ async function cmdDiscoverChannels({
   excludeChatIds = [],
   scanChats = 24,
   messageDepth = 120,
+  kind = 'chats',
 }) {
   if (!token) fail('Укажите токен аккаунта для поиска');
 
-  const target = Math.max(1, Math.min(Number(count) || 10, 50));
+  const target = Math.max(1, Math.min(Number(count) || 10, 200));
+  const discoverKind = ['chats', 'channels', 'all'].includes(String(kind)) ? String(kind) : 'chats';
   const knownHashes = new Set(sanitizeHashes(excludeHashes));
   const knownChatIds = new Set((excludeChatIds ?? []).map((id) => String(id)));
   const found = [];
   const foundHashes = new Set();
   const foundChatIds = new Set();
 
-  const DEFAULT_TOPICS = [
+  // Empty topics = open search: broad crawl for ANY chats/channels of the selected kind.
+  const userTopics = [...new Set((topics ?? []).map((t) => String(t).trim()).filter(Boolean))];
+  const isOpenSearch = userTopics.length === 0;
+
+  const DEFAULT_TOPICS_CHATS = [
+    'чат',
+    'группа',
+    'обсуждение',
+    'общение',
+    'друзья',
+    'знакомства',
+    'работа',
+    'игры',
+    'крипто',
     'новости',
+    'учёба',
+    'универ',
+    'продажи',
+    'бизнес',
+    'авто',
+    'спорт',
+    'музыка',
+    'кино',
+    'мемы',
+    'юмор',
+    'вакансии',
+    'подработка',
+    'аренда',
+    'объявления',
+    'соседи',
+    'москва',
+    'chat',
+    'group',
+  ];
+
+  const DEFAULT_TOPICS_CHANNELS = [
+    'новости',
+    'канал',
+    'подписаться',
     'крипто',
     'технологии',
     'москва',
@@ -1341,43 +1608,69 @@ async function cmdDiscoverChannels({
     'здоровье',
     'скидки',
     'вакансии',
-    'реклама',
-    'канал',
-    'чат',
-    'подписаться',
-    'приглашение',
-    'max.ru/join',
-    'телеграм',
     'блог',
-    'лайфхаки',
     'финансы',
-    'недвижимость',
-    'дизайн',
     'мемы',
+    'channel',
   ];
 
-  let topicQueue = [...new Set((topics ?? []).map((t) => String(t).trim()).filter(Boolean))];
-  if (topicQueue.length === 0) {
-    topicQueue = [...DEFAULT_TOPICS].sort(() => Math.random() - 0.5);
-  } else {
-    topicQueue = [...topicQueue].sort(() => Math.random() - 0.5);
-  }
+  const DEFAULT_TOPICS = discoverKind === 'channels'
+    ? DEFAULT_TOPICS_CHANNELS
+    : discoverKind === 'all'
+      ? [...new Set([...DEFAULT_TOPICS_CHATS, ...DEFAULT_TOPICS_CHANNELS])]
+      : DEFAULT_TOPICS_CHATS;
+
+  let topicQueue = isOpenSearch
+    ? [...DEFAULT_TOPICS].sort(() => Math.random() - 0.5)
+    : [...userTopics].sort(() => Math.random() - 0.5);
 
   const { client } = await connectWithToken(token);
 
-  function rememberHash(hash) {
-    if (!isValidJoinHash(hash)) return false;
-    if (knownHashes.has(hash) || foundHashes.has(hash)) return false;
-    foundHashes.add(hash);
-    return true;
+  function expandTopicQueries(topic) {
+    const t = String(topic ?? '').trim();
+    if (!t) return [];
+    // Open search: one query per topic — cover many themes instead of 5× expansions.
+    if (isOpenSearch) return [t];
+    const out = [t];
+    if (discoverKind === 'chats' || discoverKind === 'all') {
+      out.push(`${t} чат`, `${t} группа`, `чат ${t}`, `${t} chat`);
+    }
+    if (discoverKind === 'channels' || discoverKind === 'all') {
+      out.push(`${t} канал`, `${t} channel`);
+    }
+    return [...new Set(out.map((q) => q.trim()).filter(Boolean))];
   }
 
-  function collectHashesFromSearchPayload(payload) {
-    const hashes = [];
+  function collectCandidatesFromSearchPayload(payload) {
+    const candidates = [];
+    const seenLocal = new Set();
+
+    function pushHash(hash, meta = {}) {
+      if (!isValidJoinHash(hash)) return;
+      if (knownHashes.has(hash) || foundHashes.has(hash) || seenLocal.has(hash)) return;
+      const chatId = meta.chatId != null ? String(meta.chatId) : null;
+      // Skip already-known chats before paying for resolve.
+      if (chatId && (knownChatIds.has(chatId) || foundChatIds.has(chatId))) return;
+      seenLocal.add(hash);
+      candidates.push({
+        hash,
+        title: meta.title ?? null,
+        type: meta.type ?? null,
+        chatId,
+      });
+    }
+
     for (const row of payload?.result ?? []) {
-      const chat = row?.chat;
+      const chat = row?.chat ?? row?.channel ?? null;
+      const title = chat?.title ?? chat?.name ?? row?.title ?? null;
+      const type = chat?.type ?? row?.type ?? null;
+      const chatId = chat?.id != null ? String(chat.id) : null;
       const hashFromChat = extractHashFromChatObject(chat);
-      if (hashFromChat && rememberHash(hashFromChat)) hashes.push(hashFromChat);
+      if (hashFromChat) pushHash(hashFromChat, { title, type, chatId });
+
+      // Public link like max.ru/name — not always a join hash; still try parse.
+      const linkHash = parseJoinHash(chat?.link ?? chat?.inviteLink ?? row?.link);
+      if (linkHash) pushHash(linkHash, { title, type, chatId });
 
       const msg = row?.message ?? chat?.lastMessage;
       const elements = (msg?.elements ?? [])
@@ -1385,20 +1678,39 @@ async function cmdDiscoverChannels({
         .join(' ');
       const text = `${msg?.text ?? ''} ${elements} ${JSON.stringify(chat ?? '')}`;
       for (const hash of extractHashesFromText(text)) {
-        if (rememberHash(hash)) hashes.push(hash);
+        pushHash(hash, { title, type, chatId });
       }
     }
-    return hashes;
+    return candidates;
   }
 
   async function tryGlobalSearch(query) {
     try {
-      const response = await client.invokeMethod(60, { query, count: 25 });
+      const response = await client.invokeMethod(60, { query, count: 50 });
       const payload = rpcPayload(response, 'MSG_SEARCH_GLOBAL');
-      return collectHashesFromSearchPayload(payload);
+      const resultCount = Array.isArray(payload?.result) ? payload.result.length : 0;
+      const candidates = collectCandidatesFromSearchPayload(payload);
+      progress(`[Поиск] «${query}» → строк: ${resultCount}, invite-хешей: ${candidates.length}`);
+      if (candidates.length > 0) {
+        for (const c of candidates.slice(0, 8)) {
+          progress(
+            `[Поиск] кандидат: «${c.title ?? c.hash.slice(0, 10)}…» `
+            + `тип=${c.type ?? '?'} hash=${c.hash.slice(0, 12)}…`,
+          );
+        }
+        if (candidates.length > 8) {
+          progress(`[Поиск] …ещё ${candidates.length - 8} кандидатов`);
+        }
+      }
+      return candidates;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       progress(`[Поиск] «${query}»: ${message}`, 'warn');
+      // MAX rate-limit — stop burning the queue.
+      if (String(message).includes('too-many-global-search-attempts')) {
+        progress('[Поиск] лимит MAX на глобальный поиск — делаем паузу 8с', 'warn');
+        await sleep(8000);
+      }
       return [];
     }
   }
@@ -1426,7 +1738,9 @@ async function cmdDiscoverChannels({
             .join(' ');
           const text = `${msg.text ?? ''} ${elements}`;
           for (const hash of extractHashesFromText(text)) {
-            if (rememberHash(hash)) hashes.push(hash);
+            if (!isValidJoinHash(hash)) continue;
+            if (knownHashes.has(hash) || foundHashes.has(hash)) continue;
+            if (!hashes.includes(hash)) hashes.push(hash);
           }
         }
       } catch (error) {
@@ -1435,89 +1749,207 @@ async function cmdDiscoverChannels({
       }
       if (i < slice.length - 1) await sleep(250);
     }
-    return hashes;
+    return hashes.map((hash) => ({ hash, title: null, type: null, chatId: null }));
   }
 
-  async function resolveCandidate(hash, topic) {
+  async function resolveCandidate(candidate, topic) {
+    const hash = typeof candidate === 'string' ? candidate : candidate?.hash;
+    const previewTitle = typeof candidate === 'object' ? candidate?.title : null;
+    const previewType = typeof candidate === 'object' ? candidate?.type : null;
+    const previewChatId = typeof candidate === 'object' && candidate?.chatId != null
+      ? String(candidate.chatId)
+      : null;
+    if (!isValidJoinHash(hash)) {
+      progress(`[Пропуск] битый hash «${previewTitle ?? hash}»`);
+      return null;
+    }
+    if (knownHashes.has(hash) || foundHashes.has(hash)) {
+      progress(`[Пропуск] уже известен hash ${hash.slice(0, 12)}… («${previewTitle ?? '?'}»)`);
+      return null;
+    }
+    if (previewChatId && (knownChatIds.has(previewChatId) || foundChatIds.has(previewChatId))) {
+      progress(`[Пропуск] «${previewTitle ?? previewChatId}» уже известен (chatId)`);
+      return null;
+    }
+    if (previewType && !matchesDiscoverKind(previewType, discoverKind)) {
+      progress(
+        `[Пропуск] «${previewTitle ?? hash.slice(0, 10)}» тип ${previewType} `
+        + `(нужны: ${discoverKind === 'chats' ? 'чаты CHAT' : discoverKind === 'channels' ? 'каналы CHANNEL' : 'все'})`,
+      );
+      return null;
+    }
+
     try {
       const resolved = await resolveGroupByLink(client, hash);
       const payload = resolved?.payload ?? {};
-      if (payload.error) return null;
+      if (payload.error) {
+        const details = payload.localizedMessage ?? payload.message ?? payload.error;
+        progress(`[Пропуск] resolve «${previewTitle ?? hash.slice(0, 10)}»: ${details}`);
+        return null;
+      }
 
       const chat = chatFromPayload(payload) ?? chatFromInfoPayload(payload);
-      if (!chat?.id) return null;
+      if (!chat?.id) {
+        progress(`[Пропуск] resolve «${previewTitle ?? hash.slice(0, 10)}»: нет chat.id`);
+        return null;
+      }
 
       const chatId = String(chat.id);
-      if (knownChatIds.has(chatId) || foundChatIds.has(chatId)) return null;
+      if (knownChatIds.has(chatId) || foundChatIds.has(chatId)) {
+        progress(`[Пропуск] «${chat.title ?? previewTitle ?? chatId}» уже в базе (chatId)`);
+        return null;
+      }
 
-      const type = String(chat.type ?? 'CHAT').toUpperCase();
-      if (type === 'DIALOG') return null;
+      const type = String(chat.type ?? previewType ?? 'CHAT').toUpperCase();
+      if (type === 'DIALOG') {
+        progress(`[Пропуск] «${chat.title ?? previewTitle}» — личный диалог`);
+        return null;
+      }
+      if (!matchesDiscoverKind(type, discoverKind)) {
+        progress(
+          `[Пропуск] «${chat.title ?? chat.name ?? hash}» тип ${type} `
+          + `(нужны: ${discoverKind === 'chats' ? 'чаты CHAT' : discoverKind === 'channels' ? 'каналы CHANNEL' : 'все'})`,
+        );
+        return null;
+      }
 
       const profileHash = extractHashFromChatObject(chat);
       const finalHash = isValidJoinHash(profileHash) ? profileHash : hash;
+      const entrySource = typeof candidate === 'object' && candidate?.source
+        ? candidate.source
+        : 'discover';
 
       return {
         chatId,
-        title: chat.title ?? chat.name ?? hash,
-        type: chat.type ?? 'CHANNEL',
+        title: chat.title ?? chat.name ?? previewTitle ?? hash,
+        type: chat.type ?? (discoverKind === 'channels' ? 'CHANNEL' : 'CHAT'),
         hash: finalHash,
         inviteUrl: joinUrl(finalHash),
         topic: topic ?? null,
-        source: 'discover',
+        source: entrySource,
       };
-    } catch (_) {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      progress(`[Пропуск] ошибка resolve «${previewTitle ?? hash.slice(0, 10)}»: ${message}`);
       return null;
     }
   }
 
   try {
-    progress(`[Каталог] ищем ${target} новых каналов…`);
+    const kindLabel = discoverKind === 'chats'
+      ? 'чатов (можно писать)'
+      : discoverKind === 'channels'
+        ? 'каналов'
+        : 'чатов и каналов';
 
-    let topicIndex = 0;
-    while (found.length < target && topicIndex < topicQueue.length) {
-      const topic = topicQueue[topicIndex++];
-      progress(`[Поиск] тема «${topic}»`);
-      const hashes = await tryGlobalSearch(topic);
-      progress(`[Поиск] «${topic}» → кандидатов: ${hashes.length}`);
+    // Group chats are invite-only in MAX — use external directory for kind=chats.
+    if (discoverKind === 'chats' || discoverKind === 'all') {
+      progress(
+        `[Каталог] импорт ${kindLabel} с max-catalog.com`
+        + (isOpenSearch ? ' (без ключевых слов)' : ` по словам: ${userTopics.join(', ')}`),
+      );
+      const webCandidates = await collectMaxCatalogChatCandidates({
+        topics: userTopics,
+        target,
+        excludeHashes: knownHashes,
+        onProgress: progress,
+      });
+      progress(`[Каталог web] кандидатов со ссылками: ${webCandidates.length}`);
 
-      for (const hash of hashes) {
+      for (const candidate of webCandidates) {
         if (found.length >= target) break;
-        const entry = await resolveCandidate(hash, topic);
+        const entry = await resolveCandidate(candidate, candidate.title ?? 'max-catalog');
         if (!entry) continue;
+        // For "all" keep both; for "chats" resolveCandidate already filtered CHAT.
         found.push(entry);
         foundChatIds.add(entry.chatId);
         foundHashes.add(entry.hash);
-        progress(`[Каталог] + «${entry.title}» → ${entry.inviteUrl}`);
-        await sleep(350);
+        knownHashes.add(entry.hash);
+        progress(`[Каталог] + «${entry.title}» [${entry.type}] → ${entry.inviteUrl}`);
+        await sleep(220);
       }
-      await sleep(400);
     }
 
-    if (found.length < target) {
-      progress('[Скан чатов] глобальный поиск дал мало — сканируем сообщения…');
-      const scanned = await scanGroupChatsForLinks();
-      progress(`[Скан чатов] новых хешей: ${scanned.length}`);
-
-      for (const hash of scanned) {
-        if (found.length >= target) break;
-        const entry = await resolveCandidate(hash, 'scan');
-        if (!entry) continue;
-        found.push(entry);
-        foundChatIds.add(entry.chatId);
-        foundHashes.add(entry.hash);
-        progress(`[Каталог] + «${entry.title}» → ${entry.inviteUrl}`);
-        await sleep(350);
+    // Channels / leftover: MAX global search (indexes mostly CHANNEL).
+    if (found.length < target && (discoverKind === 'channels' || discoverKind === 'all')) {
+      progress(
+        isOpenSearch
+          ? `[Каталог] глобальный поиск MAX: до ${target - found.length} каналов`
+          : `[Каталог] глобальный поиск MAX по словам…`,
+      );
+      if (!isOpenSearch) {
+        progress(`[Каталог] ключевые слова: ${topicQueue.join(', ')}`);
+      } else {
+        progress(`[Каталог] темы обхода: ${topicQueue.length}`);
       }
+
+      let topicIndex = 0;
+      let dryQueryStreak = 0;
+      let stopEarly = false;
+      while (found.length < target && topicIndex < topicQueue.length && !stopEarly) {
+        const topic = topicQueue[topicIndex++];
+        const queries = expandTopicQueries(topic);
+        progress(`[Поиск] ключ «${topic}» → запросы: ${queries.join(' | ')}`);
+
+        for (const query of queries) {
+          if (found.length >= target || stopEarly) break;
+          const before = found.length;
+          const candidates = await tryGlobalSearch(query);
+          if (candidates.length === 0) {
+            progress(`[Поиск] «${query}» — пусто`);
+          }
+
+          for (const candidate of candidates) {
+            if (found.length >= target) break;
+            const entry = await resolveCandidate(candidate, topic);
+            if (!entry) continue;
+            found.push(entry);
+            foundChatIds.add(entry.chatId);
+            foundHashes.add(entry.hash);
+            knownHashes.add(entry.hash);
+            progress(`[Каталог] + «${entry.title}» [${entry.type}] → ${entry.inviteUrl}`);
+            await sleep(isOpenSearch ? 200 : 350);
+          }
+
+          if (found.length > before) {
+            dryQueryStreak = 0;
+          } else {
+            dryQueryStreak++;
+            if (!isOpenSearch && found.length > 0 && dryQueryStreak >= 6) {
+              progress(
+                `[Каталог] новых почти нет — возвращаем ${found.length} из ${target} (лимит не обязателен)`,
+              );
+              stopEarly = true;
+              break;
+            }
+          }
+          await sleep(isOpenSearch ? 180 : 300);
+        }
+        await sleep(120);
+      }
+    } else if (found.length < target && discoverKind === 'chats') {
+      progress(
+        `[Каталог] с max-catalog.com набрано ${found.length}/${target}`
+        + (found.length === 0
+          ? ' — глобальный поиск MAX для чатов почти бесполезен, пропускаем'
+          : ''),
+      );
     }
 
     const withLink = found.filter((g) => g.hash).length;
-    progress(`[Каталог] готово: ${found.length} из ${target}, со ссылкой: ${withLink}`);
+    progress(
+      found.length >= target
+        ? `[Каталог] готово: ${found.length} (лимит ${target}), со ссылкой: ${withLink}`
+        : `[Каталог] готово: ${found.length} — всё что нашлось (до ${target}), со ссылкой: ${withLink}`,
+    );
     ok({
       channels: found,
       groups: found,
       added: found.length,
       requested: target,
       withInviteLink: withLink,
+      kind: discoverKind,
+      source: discoverKind === 'chats' ? 'max-catalog' : 'mixed',
     });
   } finally {
     await client.disconnect().catch(() => undefined);
@@ -1548,6 +1980,52 @@ async function cmdFetchProfileInviteLinks({ token, chatIds = [], groups = [] }) 
     const groupsResult = await fetchInviteLinksForChatIds(client, chatIds, progress, groups);
     const withLink = groupsResult.filter((g) => g.hash).length;
     ok({ groups: groupsResult, total: groupsResult.length, withInviteLink: withLink });
+  } finally {
+    await client.disconnect().catch(() => undefined);
+  }
+}
+
+/**
+ * Resolve invite URL for an existing channel.
+ * If chatId omitted — pick the newest CHANNEL owned by this account.
+ */
+async function cmdResolveChannelInvite({ token, chatId }) {
+  if (!token) fail('Укажите токен');
+  const { client, profileId } = await connectWithToken(token);
+  try {
+    let id = chatId != null && String(chatId).trim() ? normalizeChatId(chatId) : null;
+    let title = null;
+
+    if (id == null) {
+      progress('[Канал] ищем свой CHANNEL…');
+      const chats = await getAllChats(client);
+      const owned = (chats ?? [])
+        .filter((c) => {
+          const t = String(c?.type ?? '').toUpperCase();
+          if (!t.includes('CHANNEL')) return false;
+          if (profileId == null) return true;
+          return String(c.owner ?? '') === String(profileId);
+        })
+        .sort((a, b) => Number(b.lastEventTime ?? b.created ?? 0) - Number(a.lastEventTime ?? a.created ?? 0));
+      if (owned.length === 0) {
+        fail('У аккаунта нет своего канала (CHANNEL)');
+      }
+      id = normalizeChatId(owned[0].id);
+      title = owned[0].title ?? owned[0].name ?? null;
+      progress(`[Канал] найден «${title ?? id}» (${id})`);
+    }
+
+    const entry = await fetchInviteLinkFromProfile(client, id, title ?? String(id), progress);
+    if (!entry?.hash) {
+      fail('Не удалось получить invite-ссылку канала');
+    }
+    ok({
+      ok: true,
+      chatId: String(id),
+      title: entry.title ?? title,
+      inviteHash: entry.hash,
+      inviteUrl: entry.inviteUrl ?? joinUrl(entry.hash),
+    });
   } finally {
     await client.disconnect().catch(() => undefined);
   }
@@ -1599,6 +2077,88 @@ async function cmdJoinGroups({ token, links, delayMs = 2500 }) {
     joined: okCount,
     failed: results.length - okCount,
     total: hashes.length,
+  });
+}
+
+async function leaveChat(client, chatId, progress, profileId = null) {
+  const id = normalizeChatId(chatId);
+  let title = String(chatId);
+  try {
+    const chat = await getChatInfo(client, id);
+    if (chat?.title || chat?.name) title = chat.title ?? chat.name;
+  } catch (_) {
+    // title optional
+  }
+
+  progress?.(`[Выход] «${title}»…`);
+  // opcode 58 CHAT_LEAVE — реально покинуть чат/канал.
+  // opcode 75 CHAT_SUBSCRIBE (subscribe:false) только отписывает от пушей, членство остаётся.
+  const response = await client.invokeMethod(58, { chatId: id });
+  assertRpcOk(response, 'CHAT_LEAVE');
+
+  // Если владелец/ограничения не дали выйти — пробуем remove себя через MANAGE_USERS.
+  if (profileId != null) {
+    const stillIn = await isUserInChat(client, id, profileId);
+    if (stillIn) {
+      progress?.(`[Выход] «${title}»: повтор через remove…`);
+      const selfIds = normalizeUserIds([profileId]);
+      const removeResponse = await client.invokeMethod(77, {
+        chatId: id,
+        userIds: selfIds,
+        operation: 'remove',
+        cleanMsgPeriod: 0,
+      });
+      assertRpcOk(removeResponse, 'CHAT_LEAVE/remove');
+      const stillAfter = await isUserInChat(client, id, profileId);
+      if (stillAfter) {
+        throw new Error('Сервер принял запрос, но аккаунт всё ещё в чате');
+      }
+    }
+  }
+
+  return { chatId: String(id), title, ok: true };
+}
+
+async function cmdLeaveGroups({ token, chatIds = [], delayMs = 2500 }) {
+  if (!token) fail('Укажите токен матки');
+  const ids = [...new Set((chatIds ?? []).map((id) => String(id).trim()).filter(Boolean))];
+  if (ids.length === 0) fail('Список chatIds пуст');
+
+  const { client, profileId } = await connectWithToken(token);
+  const results = [];
+
+  try {
+    for (let i = 0; i < ids.length; i++) {
+      const chatId = ids[i];
+      progress(`Выход ${i + 1}/${ids.length}: ${chatId}`);
+      try {
+        const entry = await leaveChat(client, chatId, progress, profileId);
+        results.push({
+          ok: true,
+          phase: 'leave',
+          chatId: entry.chatId,
+          title: entry.title,
+        });
+      } catch (error) {
+        results.push({
+          ok: false,
+          phase: 'leave',
+          chatId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if (i < ids.length - 1) await sleep(delayMs);
+    }
+  } finally {
+    await client.disconnect().catch(() => undefined);
+  }
+
+  const left = results.filter((r) => r.ok).length;
+  ok({
+    results,
+    left,
+    failed: results.length - left,
+    total: ids.length,
   });
 }
 
@@ -1908,6 +2468,12 @@ async function cmdForwardLinks({ token, links, groups = [], chatIds = [], forwar
         progress,
       });
       hashes = linkHashes;
+      const extra = sanitizeHashes(mergeHashesFromLinksAndGroups(links, []));
+      if (extra.length > 0) {
+        progress(`[Доп. ссылки] пересылка ещё ${extra.length}`);
+        await runForwardLinks(client, motherToken, extra, userIds, delayMs, results, progress);
+        hashes = [...new Set([...hashes, ...extra])];
+      }
     } else {
       hashes = sanitizeHashes(mergeHashesFromLinksAndGroups(links, groups));
       if (hashes.length === 0) fail('Нет каналов или ссылок для пересылки');
@@ -1965,6 +2531,30 @@ async function cmdForwardAndJoin({ token, links, groups = [], chatIds = [], chil
         motherUserId,
       });
       hashes = linkHashes;
+      const extra = sanitizeHashes(mergeHashesFromLinksAndGroups(links, []));
+      if (extra.length > 0) {
+        progress(`[Доп. ссылки] пересылка и вступление ещё ${extra.length}`);
+        await runForwardLinks(
+          client,
+          motherToken,
+          extra,
+          targets.map((t) => t.userId),
+          delayMs,
+          results,
+          progress,
+        );
+        await sleep(Math.max(delayMs, 1500));
+        await runChildrenJoin(
+          extra,
+          targets.map((t) => t.token),
+          delayMs,
+          results,
+          progress,
+          motherUserId,
+          targets.map((t) => t.proxy ?? null),
+        );
+        hashes = [...new Set([...hashes, ...extra])];
+      }
     } else {
       hashes = sanitizeHashes(mergeHashesFromLinksAndGroups(links, groups));
       if (hashes.length === 0) fail('Выберите каналы или укажите ссылки');
@@ -2042,6 +2632,11 @@ async function cmdChildrenJoinOnly({
     } finally {
       await client.disconnect().catch(() => undefined);
     }
+    const extra = mergeHashesFromLinksAndGroups(links, []);
+    if (extra.length > 0) {
+      progress(`[Доп. ссылки] +${extra.length} к каналам матки`);
+      hashes = [...new Set([...hashes, ...extra])];
+    }
   } else {
     hashes = mergeHashesFromLinksAndGroups(links, groups);
   }
@@ -2062,8 +2657,401 @@ async function cmdChildrenJoinOnly({
   });
 }
 
+function extractCreatedChatId(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const candidates = [
+    payload.chatId,
+    payload.chat?.id,
+    payload.message?.chatId,
+    payload.message?.chat?.id,
+  ];
+  for (const a of payload.message?.attaches ?? payload.attaches ?? []) {
+    if (a?.chatId != null) candidates.push(a.chatId);
+    if (a?.chat?.id != null) candidates.push(a.chat.id);
+    if (a?.id != null && String(a._type ?? '').toUpperCase().includes('CONTROL')) {
+      candidates.push(a.id);
+    }
+  }
+  for (const c of candidates) {
+    if (c != null && String(c).trim()) return String(c);
+  }
+  return null;
+}
+
+async function findChatIdByTitle(client, title) {
+  const want = String(title ?? '').trim().toLowerCase();
+  if (!want) return null;
+  try {
+    const chats = await getAllChats(client);
+    const found = chats.find((c) => String(c.title ?? c.name ?? '').trim().toLowerCase() === want);
+    return found?.id != null ? String(found.id) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function applyChannelDescription(client, chatId, description, title = null) {
+  const id = normalizeChatId(chatId);
+  const text = String(description ?? '').trim();
+  if (!text) return false;
+
+  // MAX CHAT_SETTINGS (op 55): description + optional theme (title).
+  const attempts = [
+    { chatId: id, description: text },
+  ];
+  const theme = title != null ? String(title).trim() : '';
+  if (theme) {
+    attempts.push({ chatId: id, theme, description: text });
+  }
+
+  let lastError = null;
+  for (const payload of attempts) {
+    try {
+      const response = await client.invokeMethod(OPCODES.CHANGE_GROUP_SETTINGS, payload);
+      assertRpcOk(response, 'CHAT_UPDATE');
+      return true;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      progress(`[Воронка] описание попытка: ${message}`, 'warn');
+    }
+  }
+  if (lastError) {
+    progress(
+      `[Воронка] описание не применено: ${lastError instanceof Error ? lastError.message : lastError}`,
+      'warn',
+    );
+  }
+  return false;
+}
+
+/** Upload image via op 80 and return photoToken (for avatar / attaches). */
+async function uploadPhotoToken(client, photoPath) {
+  const mediaPath = String(photoPath ?? '').trim();
+  if (!mediaPath || !existsSync(mediaPath)) {
+    throw new Error(`Файл фото не найден: ${mediaPath || '(пусто)'}`);
+  }
+
+  const photoData = await readFile(mediaPath);
+  const ext = path.extname(mediaPath).toLowerCase() || '.jpg';
+  const fileName = `avatar-${Date.now()}${ext}`;
+
+  const uploadUrlResponse = await client.invokeMethod(OPCODES.REQUEST_UPLOAD_URL, { count: 1 });
+  const uploadUrl = uploadUrlResponse?.payload?.url;
+  if (!uploadUrl) throw new Error('Не удалось получить URL загрузки фото');
+
+  const mimeType =
+    ext === '.png'
+      ? 'image/png'
+      : ext === '.gif'
+        ? 'image/gif'
+        : ext === '.webp'
+          ? 'image/webp'
+          : 'image/jpeg';
+
+  const blob = new Blob([photoData], { type: mimeType });
+  const formData = new FormData();
+  formData.append('file', blob, fileName);
+
+  const uploadResponse = await fetch(uploadUrl, { method: 'POST', body: formData });
+  if (!uploadResponse.ok) {
+    throw new Error(`HTTP загрузка фото: ${uploadResponse.status} ${uploadResponse.statusText}`);
+  }
+
+  const uploadResult = await uploadResponse.json();
+  const photoKey = Object.keys(uploadResult?.photos || {})[0];
+  const photoToken = uploadResult?.photos?.[photoKey]?.token;
+  if (!photoToken) throw new Error('Сервер не вернул photoToken');
+  return { photoToken, photoKey };
+}
+
+/** Set channel/group avatar via CHAT_SETTINGS { chatId, photoToken }. */
+async function applyChannelPhoto(client, chatId, photoPath) {
+  const id = normalizeChatId(chatId);
+  const { photoToken } = await uploadPhotoToken(client, photoPath);
+  const response = await client.invokeMethod(OPCODES.CHANGE_GROUP_SETTINGS, {
+    chatId: id,
+    photoToken,
+  });
+  assertRpcOk(response, 'CHAT_UPDATE');
+  return true;
+}
+
+async function sendChannelPost(client, chatId, text, mediaPath) {
+  const id = normalizeChatId(chatId);
+  const body = String(text ?? '').trim();
+  const photo = mediaPath && existsSync(mediaPath) ? mediaPath : null;
+  const parsed = parseMessageWithLinks(body);
+  const messageText = parsed.text || (photo ? ' ' : '');
+
+  if (photo) {
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        // Upload then SEND_MESSAGE so caption can carry LINK elements.
+        // uploadAndSendPhoto always sends elements: [] and drops hyperlinks.
+        const { photoToken, photoKey } = await uploadPhotoToken(client, photo);
+        const message = {
+          text: messageText,
+          cid: generateRandomId(),
+          elements: parsed.elements.length > 0 ? parsed.elements : [],
+          attaches: [
+            {
+              _type: 'PHOTO',
+              type: 'PHOTO',
+              photoId: photoKey,
+              photoToken,
+              width: 300,
+              height: 200,
+              baseUrl: `https://i.oneme.ru/i?r=${photoKey}`,
+            },
+          ],
+        };
+        const response = await client.invokeMethod(OPCODES.SEND_MESSAGE, {
+          chatId: id,
+          message,
+          notify: true,
+        });
+        assertRpcOk(response, 'SEND_MESSAGE');
+        return { sent: true, withPhoto: true };
+      } catch (error) {
+        lastError = error;
+        const message = error instanceof Error ? error.message : String(error);
+        progress(`[Воронка] загрузка фото попытка ${attempt}/2: ${message}`, 'warn');
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, 1200 * attempt));
+        }
+      }
+    }
+    // Fallback: publish text (with links) without photo.
+    if (body) {
+      progress(
+        `[Воронка] фото не ушло (${lastError instanceof Error ? lastError.message : lastError}) — шлём текст`,
+        'warn',
+      );
+      const response = await client.invokeMethod(OPCODES.SEND_MESSAGE, {
+        chatId: id,
+        message: buildTextMessagePayload(body),
+        notify: true,
+      });
+      assertRpcOk(response, 'SEND_MESSAGE');
+      return {
+        sent: true,
+        withPhoto: false,
+        photoError: lastError instanceof Error ? lastError.message : String(lastError),
+      };
+    }
+    throw lastError ?? new Error('Не удалось отправить фото');
+  }
+
+  if (!body) return { sent: false, withPhoto: false };
+
+  const response = await client.invokeMethod(OPCODES.SEND_MESSAGE, {
+    chatId: id,
+    message: buildTextMessagePayload(body),
+    notify: true,
+  });
+  assertRpcOk(response, 'SEND_MESSAGE');
+  return { sent: true, withPhoto: false };
+}
+
+/**
+ * Publish funnel posts into an existing channel (no create).
+ * Also returns inviteUrl when available (for backfilling {channel_link}).
+ */
+async function cmdFunnelPublish(args) {
+  const token = String(args.token ?? '').trim();
+  const chatId = String(args.chatId ?? '').trim();
+  if (!token) fail('Укажите token');
+  if (!chatId) fail('Укажите chatId канала');
+
+  const posts = Array.isArray(args.posts) ? args.posts : [];
+
+  const { client } = await connectWithToken(token, args.proxy);
+  try {
+    progress(`[Воронка] публикация в chat ${chatId} (${posts.length} пост.)…`);
+    let postsSent = 0;
+    let photoFailures = 0;
+
+    for (let i = 0; i < posts.length; i++) {
+      const post = posts[i] ?? {};
+      const text = String(post.text ?? '').trim();
+      const media = asString(post.mediaPath);
+      if (!text && !media) continue;
+      try {
+        progress(`[Воронка] публикация ${i + 1}/${posts.length}…`);
+        const sent = await sendChannelPost(client, chatId, text, media);
+        if (sent?.sent) postsSent += 1;
+        if (sent?.photoError) photoFailures += 1;
+        progress(`[Воронка] ✓ пост ${i + 1}${sent?.withPhoto ? ' (с фото)' : ''}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        progress(`[Воронка] ✗ пост ${i + 1}: ${message}`, 'warn');
+      }
+      const delayMs = Number(post.delayMs ?? post.delayAfterMs ?? 2000);
+      if (i < posts.length - 1 && delayMs > 0) {
+        await new Promise((r) => setTimeout(r, Math.min(delayMs, 60000)));
+      }
+    }
+
+    let inviteHash = null;
+    try {
+      const chat = await getChatInfo(client, chatId);
+      inviteHash = extractHashFromChatObject(chat);
+      if (!inviteHash) {
+        const refreshed = await reworkInviteLink(client, chatId, false);
+        inviteHash = extractHashFromChatObject(refreshed);
+      }
+    } catch (_) {
+      // optional
+    }
+
+    ok({
+      ok: true,
+      chatId: String(normalizeChatId(chatId)),
+      postsSent,
+      photoFailures,
+      inviteHash,
+      inviteUrl: inviteHash ? joinUrl(inviteHash) : null,
+    });
+  } finally {
+    await safeDisconnect(client);
+  }
+}
+
+/**
+ * Create a channel from template, optionally set description and publish posts.
+ */
+async function cmdFunnelSetup(args) {
+  const token = String(args.token ?? '').trim();
+  const title = String(args.title ?? '').trim();
+  if (!token) fail('Укажите token');
+  if (!title) fail('Укажите title канала');
+
+  const description = asString(args.description);
+  const photoPath = asString(args.photoPath);
+  const posts = Array.isArray(args.posts) ? args.posts : [];
+  const publish = args.publish !== false;
+
+  const { client } = await connectWithToken(token, args.proxy);
+  try {
+    progress(`[Воронка] создание канала «${title}»…`);
+    const created = await createChannel(client, title);
+    const createPayload = assertRpcOk(created, 'CREATE_CHANNEL');
+    progress('[Воронка] createChannel ответ', 'debug', summarizeRpc(created));
+
+    let chatId = extractCreatedChatId(createPayload);
+    if (!chatId) {
+      await new Promise((r) => setTimeout(r, 800));
+      chatId = await findChatIdByTitle(client, title);
+    }
+    if (!chatId) {
+      fail('Канал создан, но не удалось получить chatId из ответа API');
+    }
+
+    progress(`[Воронка] ✓ канал создан: ${chatId}`);
+    // Brief pause — freshly created channel may reject settings for a moment.
+    await new Promise((r) => setTimeout(r, 600));
+
+    let descriptionOk = false;
+    if (description) {
+      descriptionOk = await applyChannelDescription(client, chatId, description, title);
+      progress(
+        descriptionOk
+          ? '[Воронка] ✓ описание канала обновлено'
+          : '[Воронка] ✗ не удалось выставить описание',
+        descriptionOk ? 'info' : 'warn',
+      );
+    }
+
+    let avatarOk = false;
+    if (photoPath && existsSync(photoPath)) {
+      try {
+        progress('[Воронка] установка фото канала…');
+        avatarOk = await applyChannelPhoto(client, chatId, photoPath);
+        progress('[Воронка] ✓ фото канала установлено');
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        progress(`[Воронка] ✗ фото канала: ${message}`, 'warn');
+      }
+    } else if (photoPath) {
+      progress(`[Воронка] файл фото не найден: ${photoPath}`, 'warn');
+    }
+
+    let postsSent = 0;
+    let photoFailures = 0;
+    if (publish) {
+      const queue = [...posts];
+      // Channel avatar is set above — do not reuse photoPath as a post attachment.
+
+      for (let i = 0; i < queue.length; i++) {
+        const post = queue[i] ?? {};
+        const text = String(post.text ?? '').trim();
+        const media = asString(post.mediaPath);
+        if (!text && !media) continue;
+        try {
+          progress(`[Воронка] публикация ${i + 1}/${queue.length}…`);
+          const sent = await sendChannelPost(client, chatId, text, media);
+          if (sent?.sent) postsSent += 1;
+          if (sent?.photoError) photoFailures += 1;
+          progress(`[Воронка] ✓ пост ${i + 1}${sent?.withPhoto ? ' (с фото)' : ''}`);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          progress(`[Воронка] ✗ пост ${i + 1}: ${message}`, 'warn');
+        }
+        const delayMs = Number(post.delayMs ?? post.delayAfterMs ?? 2000);
+        if (i < queue.length - 1 && delayMs > 0) {
+          await new Promise((r) => setTimeout(r, Math.min(delayMs, 60000)));
+        }
+      }
+    }
+
+    let inviteHash = null;
+    try {
+      const chat = await getChatInfo(client, chatId);
+      inviteHash = extractHashFromChatObject(chat);
+      if (!inviteHash) {
+        const refreshed = await reworkInviteLink(client, chatId, false);
+        inviteHash = extractHashFromChatObject(refreshed);
+      }
+    } catch (_) {
+      // optional
+    }
+
+    ok({
+      ok: true,
+      chatId: String(chatId),
+      title,
+      descriptionApplied: descriptionOk,
+      avatarApplied: avatarOk,
+      postsSent,
+      photoFailures,
+      inviteHash,
+      inviteUrl: inviteHash ? joinUrl(inviteHash) : null,
+      privateChannel: Boolean(args.privateChannel),
+      commentsEnabled: args.commentsEnabled !== false,
+    });
+  } finally {
+    await safeDisconnect(client);
+  }
+}
+
 const [,, command, rawArgs] = process.argv;
-const args = rawArgs ? JSON.parse(rawArgs) : {};
+
+/** Inline JSON, or `@path` / `--args-file=path` for large payloads (Windows argv limit). */
+async function loadCliArgs(raw) {
+  if (raw == null || raw === '') return {};
+  const text = String(raw);
+  if (text.startsWith('@')) {
+    return JSON.parse(await readFile(text.slice(1), 'utf-8'));
+  }
+  if (text.startsWith('--args-file=')) {
+    return JSON.parse(await readFile(text.slice('--args-file='.length), 'utf-8'));
+  }
+  return JSON.parse(text);
+}
+
+const args = await loadCliArgs(rawArgs);
 
 const MOTHER_COMMANDS = new Set([
   'mother-deploy',
@@ -2075,7 +3063,11 @@ const MOTHER_COMMANDS = new Set([
   'discover-channels',
   'fetch-profile-invite-links',
   'scan-chat-invites',
+  'resolve-channel-invite',
   'join-groups',
+  'leave-groups',
+  'funnel-setup',
+  'funnel-publish',
 ]);
 
 try {
@@ -2114,6 +3106,9 @@ try {
     case 'join-groups':
       await cmdJoinGroups(args);
       break;
+    case 'leave-groups':
+      await cmdLeaveGroups(args);
+      break;
     case 'mother-deploy':
       await cmdMotherDeploy(args);
       break;
@@ -2140,6 +3135,15 @@ try {
       break;
     case 'fetch-profile-invite-links':
       await cmdFetchProfileInviteLinks(args);
+      break;
+    case 'resolve-channel-invite':
+      await cmdResolveChannelInvite(args);
+      break;
+    case 'funnel-setup':
+      await cmdFunnelSetup(args);
+      break;
+    case 'funnel-publish':
+      await cmdFunnelPublish(args);
       break;
     default:
       fail('Неизвестная команда');

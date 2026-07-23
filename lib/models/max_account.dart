@@ -53,6 +53,9 @@ class MaxAccount {
     this.lastOpenedAt,
     this.notes,
     this.phone,
+    this.firstName,
+    this.lastName,
+    this.description,
     this.apiToken,
     this.viewerId,
     this.authMethod = MaxAuthMethod.qr,
@@ -69,6 +72,9 @@ class MaxAccount {
   final DateTime? lastOpenedAt;
   final String? notes;
   final String? phone;
+  final String? firstName;
+  final String? lastName;
+  final String? description;
   final String? apiToken;
   final int? viewerId;
   final MaxAuthMethod authMethod;
@@ -81,6 +87,16 @@ class MaxAccount {
   bool get hasEmulator => emulator.isConfigured;
   bool get isBanned => healthStatus == AccountHealthStatus.banned;
   bool get isHealthy => healthStatus == AccountHealthStatus.ok;
+
+  /// Display «Имя Фамилия» when profile fields are known.
+  String get profileDisplayName {
+    final parts = [
+      if (firstName?.trim().isNotEmpty == true) firstName!.trim(),
+      if (lastName?.trim().isNotEmpty == true) lastName!.trim(),
+    ];
+    if (parts.isNotEmpty) return parts.join(' ');
+    return label;
+  }
 
   /// Uzbek accounts: +998 phone, or «узб»/«uzb» in label/notes.
   bool get isUzbek {
@@ -99,6 +115,9 @@ class MaxAccount {
     DateTime? lastOpenedAt,
     String? notes,
     String? phone,
+    String? firstName,
+    String? lastName,
+    String? description,
     String? apiToken,
     int? viewerId,
     MaxAuthMethod? authMethod,
@@ -116,6 +135,9 @@ class MaxAccount {
       lastOpenedAt: lastOpenedAt ?? this.lastOpenedAt,
       notes: notes ?? this.notes,
       phone: phone ?? this.phone,
+      firstName: firstName ?? this.firstName,
+      lastName: lastName ?? this.lastName,
+      description: description ?? this.description,
       apiToken: apiToken ?? this.apiToken,
       viewerId: viewerId ?? this.viewerId,
       authMethod: authMethod ?? this.authMethod,
@@ -134,6 +156,9 @@ class MaxAccount {
         'lastOpenedAt': lastOpenedAt?.toIso8601String(),
         'notes': notes,
         if (phone != null) 'phone': phone,
+        if (firstName != null) 'firstName': firstName,
+        if (lastName != null) 'lastName': lastName,
+        if (description != null) 'description': description,
         if (apiToken != null) 'apiToken': apiToken,
         if (viewerId != null) 'viewerId': viewerId,
         'authMethod': authMethod.name,
@@ -158,6 +183,9 @@ class MaxAccount {
           : null,
       notes: json['notes'] as String?,
       phone: json['phone'] as String?,
+      firstName: json['firstName'] as String?,
+      lastName: json['lastName'] as String?,
+      description: json['description'] as String?,
       apiToken: json['apiToken'] as String?,
       viewerId: (json['viewerId'] as num?)?.toInt(),
       authMethod: authRaw == 'sms'

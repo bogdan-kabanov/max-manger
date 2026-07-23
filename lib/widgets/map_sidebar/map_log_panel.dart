@@ -18,7 +18,7 @@ class MapLogPanel extends StatelessWidget {
         children: [
           const Divider(height: 1),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 8, 4),
+            padding: const EdgeInsets.fromLTRB(12, 8, 8, 4),
             child: Row(
               children: [
                 const Expanded(
@@ -44,6 +44,7 @@ class MapLogPanel extends StatelessWidget {
           ),
           Expanded(
             child: ListView.builder(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
               itemCount: browser.logs.length,
               itemBuilder: (context, index) {
                 final entry = browser.logs[index];
@@ -54,15 +55,32 @@ class MapLogPanel extends StatelessWidget {
                         : entry.message.contains('🔍')
                             ? Colors.blueGrey
                             : null;
-                return ListTile(
-                  dense: true,
-                  title: Text(
-                    entry.message,
-                    style: TextStyle(fontSize: 11, color: color, fontFamily: 'Consolas'),
-                  ),
-                  subtitle: Text(
-                    '${entry.time.hour}:${entry.time.minute.toString().padLeft(2, '0')}:${entry.time.second.toString().padLeft(2, '0')}',
-                    style: const TextStyle(fontSize: 10),
+                final time =
+                    '${entry.time.hour}:${entry.time.minute.toString().padLeft(2, '0')}:${entry.time.second.toString().padLeft(2, '0')}';
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: SelectableText.rich(
+                    TextSpan(
+                      children: [
+                        TextSpan(
+                          text: '$time  ',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: Theme.of(context).hintColor,
+                            fontFamily: 'Consolas',
+                          ),
+                        ),
+                        TextSpan(
+                          text: entry.message,
+                          style: TextStyle(
+                            fontSize: 11,
+                            height: 1.35,
+                            color: color,
+                            fontFamily: 'Consolas',
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 );
               },

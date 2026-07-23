@@ -1,29 +1,79 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../../models/max_account.dart';
 import '../../providers/app_state.dart';
+import '../../services/max_auth_service.dart';
 
-/// Slim account identity tab — no groups/chats clutter.
-class AccountMapPanel extends StatelessWidget {
+/// Slim account identity tab — profile fields for the selected account.
+class AccountMapPanel extends StatefulWidget {
   const AccountMapPanel({super.key, required this.accountId});
 
   final String accountId;
 
   @override
+  State<AccountMapPanel> createState() => _AccountMapPanelState();
+}
+
+class _AccountMapPanelState extends State<AccountMapPanel> {
+  bool _refreshing = false;
+
+  Future<void> _refreshProfile(MaxAccount account) async {
+    setState(() => _refreshing = true);
+    final result = await context.read<AppState>().refreshAccountProfile(account);
+    if (!mounted) return;
+    setState(() => _refreshing = false);
+    final fresh = context.read<AppState>().accountById(account.id);
+    final phone = fresh?.phone?.trim();
+    final id = fresh?.viewerId;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.ok
+              ? [
+                  'Инфо обновлено',
+                  if (phone != null && phone.isNotEmpty) phone,
+                  if (id != null) 'id $id',
+                ].join(' · ')
+              : (result.error ?? 'Не удалось обновить'),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _copy(String label, String value) async {
+    await Clipboard.setData(ClipboardData(text: value));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('$label скопирован'), duration: const Duration(seconds: 2)),
+    );
+  }
+
+  String _authLabel(MaxAuthMethod method) {
+    return switch (method) {
+      MaxAuthMethod.qr => 'QR',
+      MaxAuthMethod.sms => 'SMS',
+      MaxAuthMethod.token => 'токен',
+    };
+  }
+
+  @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
-    final account = state.accountById(accountId);
+    final account = state.accountById(widget.accountId);
     if (account == null) {
       return const Center(child: Text('Аккаунт не найден'));
     }
 
     final theme = Theme.of(context);
-    final groups = state.groupsForAccount(accountId);
+    final groups = state.groupsForAccount(widget.accountId);
     final totalChats = groups.fold<int>(
       0,
       (sum, g) => sum + (g.group?.targetChats.length ?? 0),
     );
+    final phone = account.phone?.trim();
+    final token = account.apiToken;
 
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
@@ -35,50 +85,87 @@ class AccountMapPanel extends StatelessWidget {
             Expanded(
               child: Text(
                 account.label,
-                style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+                style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
               ),
             ),
+            if (account.hasApiSession)
+              IconButton(
+                tooltip: 'Обновить инфо с MAX',
+                onPressed: _refreshing ? null : () => _refreshProfile(account),
+                icon: _refreshing
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.sync, size: 20),
+              ),
           ],
         ),
-        const SizedBox(height: 4),
-        Text(
-          account.healthStatus.longLabel,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: switch (account.healthStatus) {
-              AccountHealthStatus.ok => Colors.lightGreenAccent,
-              AccountHealthStatus.banned => Colors.redAccent,
-              AccountHealthStatus.authFailed => Colors.orangeAccent,
-              AccountHealthStatus.networkError => Colors.blueGrey.shade200,
-              AccountHealthStatus.unknown => null,
-            },
-          ),
+        const SizedBox(height: 12),
+        Text('Данные профиля', style: theme.textTheme.titleSmall),
+        const SizedBox(height: 6),
+        _ProfileRow(
+          label: 'имя',
+          value: (account.firstName?.trim().isNotEmpty == true)
+              ? account.firstName!.trim()
+              : '—',
+          onCopy: account.firstName?.trim().isNotEmpty == true
+              ? () => _copy('Имя', account.firstName!.trim())
+              : null,
         ),
-        Text(
-          account.hasApiSession ? 'Токен подключён' : 'Нет API-токена',
-          style: theme.textTheme.bodySmall,
+        _ProfileRow(
+          label: 'фамилия',
+          value: (account.lastName?.trim().isNotEmpty == true)
+              ? account.lastName!.trim()
+              : '—',
+          onCopy: account.lastName?.trim().isNotEmpty == true
+              ? () => _copy('Фамилия', account.lastName!.trim())
+              : null,
         ),
-        if (account.lastError != null && account.healthStatus.isProblem) ...[
-          const SizedBox(height: 2),
-          Text(
-            account.lastError!,
-            style: theme.textTheme.bodySmall?.copyWith(color: Colors.orangeAccent),
-            maxLines: 3,
-            overflow: TextOverflow.ellipsis,
-          ),
-        ],
-        if (account.viewerId != null) ...[
-          const SizedBox(height: 2),
-          Text('viewerId ${account.viewerId}', style: theme.textTheme.bodySmall),
-        ],
-        if (account.phone?.trim().isNotEmpty == true) ...[
-          const SizedBox(height: 2),
-          Text(account.phone!.trim(), style: theme.textTheme.bodySmall),
-        ],
-        const SizedBox(height: 16),
-        Text(
-          'Группы и чаты — на соседних вкладках. Здесь только сам аккаунт.',
-          style: theme.textTheme.bodySmall,
+        _ProfileRow(
+          label: 'описание',
+          value: (account.description?.trim().isNotEmpty == true)
+              ? account.description!.trim()
+              : '—',
+          onCopy: account.description?.trim().isNotEmpty == true
+              ? () => _copy('Описание', account.description!.trim())
+              : null,
         ),
+        _ProfileRow(
+          label: 'телефон',
+          value: (phone != null && phone.isNotEmpty) ? phone : '—',
+          onCopy: (phone != null && phone.isNotEmpty) ? () => _copy('Телефон', phone) : null,
+        ),
+        _ProfileRow(
+          label: 'viewerId',
+          value: account.viewerId?.toString() ?? '—',
+          onCopy: account.viewerId != null
+              ? () => _copy('viewerId', '${account.viewerId}')
+              : null,
+        ),
+        _ProfileRow(
+          label: 'статус',
+          value: account.healthStatus.longLabel,
+        ),
+        _ProfileRow(
+          label: 'вход',
+          value: _authLabel(account.authMethod),
+        ),
+        _ProfileRow(
+          label: 'токен',
+          value: token != null && token.isNotEmpty
+              ? MaxAuthService.tokenPreview(token)
+              : 'нет',
+          onCopy: token != null && token.isNotEmpty ? () => _copy('Токен', token) : null,
+        ),
+        _ProfileRow(
+          label: 'прокси',
+          value: (account.isolation.proxyServer?.trim().isNotEmpty == true) ? 'есть' : 'нет',
+        ),
+        if (account.lastError != null && account.healthStatus.isProblem)
+          _ProfileRow(label: 'ошибка', value: account.lastError!),
+        if (account.isUzbek) const _ProfileRow(label: 'регион', value: 'UZ (+998)'),
         const SizedBox(height: 16),
         OutlinedButton.icon(
           onPressed: () => state.setBrowserDrawerOpen(true),
@@ -86,11 +173,11 @@ class AccountMapPanel extends StatelessWidget {
           label: const Text('Открыть MAX'),
         ),
         const SizedBox(height: 20),
-        Text('Кратко', style: theme.textTheme.titleSmall),
-        const SizedBox(height: 8),
+        Text('На карте', style: theme.textTheme.titleSmall),
+        const SizedBox(height: 4),
         _StatTile(
           icon: Icons.folder_outlined,
-          label: 'Групп на карте',
+          label: 'Групп',
           value: '${groups.length}',
         ),
         _StatTile(
@@ -98,12 +185,55 @@ class AccountMapPanel extends StatelessWidget {
           label: 'Чатов в группах',
           value: '$totalChats',
         ),
-        _StatTile(
-          icon: Icons.vpn_key_outlined,
-          label: 'Прокси',
-          value: (account.isolation.proxyServer?.trim().isNotEmpty == true) ? 'есть' : 'нет',
-        ),
       ],
+    );
+  }
+}
+
+class _ProfileRow extends StatelessWidget {
+  const _ProfileRow({
+    required this.label,
+    required this.value,
+    this.onCopy,
+  });
+
+  final String label;
+  final String value;
+  final VoidCallback? onCopy;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 72,
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+            ),
+          ),
+          if (onCopy != null)
+            IconButton(
+              onPressed: onCopy,
+              icon: const Icon(Icons.copy, size: 14),
+              visualDensity: VisualDensity.compact,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+              padding: EdgeInsets.zero,
+              tooltip: 'Копировать',
+            ),
+        ],
+      ),
     );
   }
 }

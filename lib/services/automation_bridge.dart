@@ -14,7 +14,7 @@ class AutomationBridge {
   static String _bridgeScript() {
     return '''
 (function () {
-  if (window.__maxDesktop && window.__maxDesktop.__version === 4) return;
+  if (window.__maxDesktop && window.__maxDesktop.__version === 5) return;
   if (window.__maxDesktopObserver) {
     try { window.__maxDesktopObserver.disconnect(); } catch (_) {}
   }
@@ -107,33 +107,193 @@ class AutomationBridge {
     return document.querySelector('div[contenteditable="true"], textarea, [role="textbox"]');
   }
 
+  function readInputText(el) {
+    if (!el) return '';
+    if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') return String(el.value || '');
+    return String(el.innerText || el.textContent || '').replace(/\\u00a0/g, ' ').trim();
+  }
+
+  function setNativeValue(el, text) {
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) desc.set.call(el, text);
+    else el.value = text;
+  }
+
   function setInputValue(el, text) {
     if (!el) return false;
+    const want = String(text || '');
     el.focus();
     if (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') {
-      el.value = text;
+      setNativeValue(el, want);
       el.dispatchEvent(new Event('input', { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
+      return readInputText(el) === want;
     }
-    el.textContent = text;
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
-    return true;
+
+    // contenteditable (MAX web / React): selectAll + insertText is most reliable
+    try {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    } catch (_) {}
+
+    let ok = false;
+    try {
+      ok = document.execCommand('insertText', false, want);
+    } catch (_) {
+      ok = false;
+    }
+
+    if (!ok || !readInputText(el)) {
+      try {
+        el.textContent = '';
+        el.dispatchEvent(new InputEvent('beforeinput', {
+          bubbles: true, cancelable: true, inputType: 'deleteContentBackward', data: null,
+        }));
+        el.textContent = want;
+        el.dispatchEvent(new InputEvent('beforeinput', {
+          bubbles: true, cancelable: true, inputType: 'insertText', data: want,
+        }));
+        el.dispatchEvent(new InputEvent('input', {
+          bubbles: true, inputType: 'insertText', data: want,
+        }));
+      } catch (_) {
+        el.textContent = want;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }
+
+    const got = readInputText(el);
+    if (!want) return got.length === 0;
+    if (got === want) return true;
+    // Soft match: UI may normalize whitespace / add zero-width chars
+    const norm = (s) => s.replace(/\\s+/g, ' ').trim();
+    return norm(got) === norm(want) || norm(got).includes(norm(want).slice(0, Math.min(24, want.length)));
   }
 
   function clickSendButton() {
-    const candidates = [
-      ...document.querySelectorAll('button'),
-      ...document.querySelectorAll('[role="button"]'),
+    const composer = findComposerInput();
+
+    // 1) Explicit text / aria / title / test id
+    const allButtons = [
+      ...document.querySelectorAll('button, [role="button"], [type="submit"]'),
     ];
-    for (const btn of candidates) {
-      const label = normalize(btn.innerText || btn.getAttribute('aria-label') || '');
-      if (label.includes('отправ') || label === 'send' || label.includes('send')) {
+    for (const btn of allButtons) {
+      if (!isVisible(btn)) continue;
+      const label = normalize(
+        [
+          btn.innerText,
+          btn.getAttribute('aria-label'),
+          btn.getAttribute('title'),
+          btn.getAttribute('data-testid'),
+          btn.getAttribute('data-qa'),
+          btn.getAttribute('name'),
+        ]
+          .filter(Boolean)
+          .join(' '),
+      );
+      if (
+        label.includes('отправ') ||
+        label.includes('send') ||
+        label.includes('paper-plane') ||
+        label.includes('paperplane') ||
+        label.includes('submit')
+      ) {
         btn.click();
         return true;
       }
     }
-    return false;
+
+    // 2) Buttons near the composer (icon-only send is common in MAX web)
+    if (composer) {
+      const near = findSendNearComposer(composer);
+      if (near) {
+        near.click();
+        return true;
+      }
+    }
+
+    // 3) Fallback: Enter in the composer (most reliable for chat UIs)
+    if (composer) {
+      composer.focus();
+      if (pressEnterOn(composer)) return true;
+    }
+    return pressEnterOnActive();
+  }
+
+  function isVisible(el) {
+    if (!el) return false;
+    if (!el.offsetParent && el !== document.activeElement) {
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+        return false;
+      }
+    }
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function findSendNearComposer(composer) {
+    let root = composer.parentElement;
+    for (let depth = 0; depth < 6 && root; depth++) {
+      const buttons = root.querySelectorAll('button, [role="button"]');
+      let best = null;
+      let bestScore = -1;
+      const cRect = composer.getBoundingClientRect();
+      for (const btn of buttons) {
+        if (!isVisible(btn)) continue;
+        const rect = btn.getBoundingClientRect();
+        // Prefer compact square-ish controls to the right of the input
+        const toTheRight = rect.left >= cRect.right - 8;
+        const sameRow = Math.abs(rect.top + rect.height / 2 - (cRect.top + cRect.height / 2)) < 48;
+        if (!sameRow && !toTheRight) continue;
+        const area = rect.width * rect.height;
+        if (area < 200 || area > 20000) continue;
+        const hasSvg = !!btn.querySelector('svg');
+        const disabled =
+          btn.disabled === true ||
+          btn.getAttribute('aria-disabled') === 'true' ||
+          btn.getAttribute('data-disabled') === 'true';
+        if (disabled) continue;
+        let score = 0;
+        if (toTheRight) score += 5;
+        if (sameRow) score += 3;
+        if (hasSvg) score += 2;
+        if (rect.width <= 64 && rect.height <= 64) score += 2;
+        if (score > bestScore) {
+          bestScore = score;
+          best = btn;
+        }
+      }
+      if (best && bestScore >= 5) return best;
+      root = root.parentElement;
+    }
+    return null;
+  }
+
+  function pressEnterOn(el) {
+    if (!el) return false;
+    el.focus();
+    const opts = {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      which: 13,
+      bubbles: true,
+      cancelable: true,
+    };
+    el.dispatchEvent(new KeyboardEvent('keydown', opts));
+    el.dispatchEvent(new KeyboardEvent('keypress', opts));
+    el.dispatchEvent(new KeyboardEvent('keyup', opts));
+    return true;
+  }
+
+  function pressEnterOnActive() {
+    const el = document.activeElement || findComposerInput();
+    return pressEnterOn(el);
   }
 
   function clickByText(text) {
@@ -253,14 +413,6 @@ class AutomationBridge {
     return true;
   }
 
-  function pressEnterOnActive() {
-    const el = document.activeElement || findComposerInput();
-    if (!el) return false;
-    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-    el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', bubbles: true }));
-    return true;
-  }
-
   async function executeMacroStep(step) {
     const type = step.type;
     try {
@@ -285,7 +437,14 @@ class AutomationBridge {
       if (type === 'typeText') {
         const el = step.selector ? document.querySelector(step.selector) : findComposerInput();
         if (!el) return { ok: false, error: 'Поле ввода не найдено' };
-        setInputValue(el, step.text || '');
+        const want = step.text || '';
+        const ok = setInputValue(el, want);
+        if (!ok) {
+          return {
+            ok: false,
+            error: 'Текст не попал в поле ввода (contenteditable) — сообщение не будет отправлено',
+          };
+        }
         return { ok: true };
       }
       if (type === 'focusInput') {
@@ -295,10 +454,36 @@ class AutomationBridge {
         return { ok: true };
       }
       if (type === 'pressEnter') {
+        const composer = findComposerInput();
+        if (composer && !readInputText(composer).trim()) {
+          return { ok: false, error: 'Поле пустое — Enter не отправлен' };
+        }
         return pressEnterOnActive() ? { ok: true } : { ok: false, error: 'Enter не отправлен' };
       }
       if (type === 'clickSend') {
-        return clickSendButton() ? { ok: true } : { ok: false, error: 'Кнопка отправки не найдена' };
+        const composer = findComposerInput();
+        const beforeText = readInputText(composer);
+        if (!beforeText.trim()) {
+          return {
+            ok: false,
+            error: 'Поле пустое — нечего отправлять (шаг typeText не сработал?)',
+          };
+        }
+        const outBefore = countOutgoingMessages(document.body);
+        const clicked = clickSendButton();
+        if (!clicked) {
+          return { ok: false, error: 'Кнопка отправки не найдена (и Enter не сработал)' };
+        }
+        await sleep(450);
+        const afterText = readInputText(findComposerInput());
+        const outAfter = countOutgoingMessages(document.body);
+        if (afterText.trim() === beforeText.trim() && outAfter <= outBefore) {
+          return {
+            ok: false,
+            error: 'Сообщение не ушло: поле не очистилось после отправки',
+          };
+        }
+        return { ok: true };
       }
       return { ok: false, error: 'Неизвестный шаг: ' + type };
     } catch (err) {
@@ -315,7 +500,9 @@ class AutomationBridge {
       post('macro.stepDone', { index: i, type: step.type, ...result });
       if (!result.ok) break;
     }
-    post('macro.done', { results });
+    const ok = results.length > 0 && results.every((r) => r.ok);
+    const failed = results.filter((r) => !r.ok).length;
+    post('macro.done', { results, ok, failed, total: results.length });
     return results;
   }
 
@@ -594,7 +781,7 @@ class AutomationBridge {
   });
 
   window.__maxDesktop = {
-    __version: 4,
+    __version: 5,
     setRules(rules) {
       state.rules = Array.isArray(rules) ? rules : [];
       post('automation.rulesUpdated', { count: state.rules.length });

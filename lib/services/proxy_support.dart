@@ -34,31 +34,50 @@ class ParsedProxy {
     }
   }
 
-  /// Chromium `--proxy-server` value. Auth in SOCKS URL is unreliable in WebView2;
-  /// we still pass the full URL — API/CLI use proper SOCKS auth separately.
+  /// Value for Chromium `--proxy-server`.
+  ///
+  /// Must NOT include credentials — that causes `ERR_NO_SUPPORTED_PROXIES`.
+  /// Edge/WebView2 also has no SOCKS5 auth; authenticated SOCKS is remapped
+  /// to HTTP CONNECT (`http://host:port`) and credentials go through
+  /// [BasicAuthenticationRequested] via `--max-desktop-proxy-*` flags.
   String get chromiumProxyServer {
-    if (isSocks) {
-      // Prefer socks5://host:port; credentials via user:pass@ when present.
-      final auth = hasAuth
-          ? '${Uri.encodeComponent(username ?? '')}:${Uri.encodeComponent(password ?? '')}@'
-          : '';
-      return 'socks5://$auth$host:$port';
+    if (isSocks && !hasAuth) {
+      return 'socks5://$host:$port';
     }
+    // HTTP(S) proxy, or SOCKS+auth (unsupported in Edge) → HTTP CONNECT.
+    return 'http://$host:$port';
+  }
+
+  /// Extra Chromium args that the WebView2 plugin strips and uses for 407 auth.
+  List<String> get chromiumAuthArguments {
+    if (!hasAuth) return const [];
+    return [
+      '--max-desktop-proxy-user=${Uri.encodeComponent(username ?? '')}',
+      '--max-desktop-proxy-pass=${Uri.encodeComponent(password ?? '')}',
+    ];
+  }
+
+  /// Canonical URL for API / Node (`user:pass@host` form).
+  String get normalizedUrl {
     final auth = hasAuth
         ? '${Uri.encodeComponent(username ?? '')}:${Uri.encodeComponent(password ?? '')}@'
         : '';
+    if (isSocks) {
+      final sch = scheme.startsWith('socks5') ? 'socks5' : scheme;
+      return '$sch://$auth$host:$port';
+    }
     final sch = scheme == 'https' ? 'https' : 'http';
     return '$sch://$auth$host:$port';
   }
 
   static ParsedProxy? tryParse(String? raw) {
-    final value = raw?.trim();
-    if (value == null || value.isEmpty) return null;
+    final value = _preprocess(raw);
+    if (value == null) return null;
 
     final withScheme = value.contains('://') ? value : 'http://$value';
     final uri = Uri.tryParse(withScheme);
     if (uri == null || uri.host.isEmpty) {
-      throw FormatException('Некорректный прокси: $value');
+      throw FormatException('Некорректный прокси: $raw');
     }
 
     final scheme = uri.scheme.toLowerCase();
@@ -77,13 +96,52 @@ class ParsedProxy {
     }
 
     return ParsedProxy(
-      raw: value,
+      raw: raw!.trim(),
       scheme: scheme,
       host: uri.host,
       port: port,
       username: user,
       password: pass,
     );
+  }
+
+  /// Accepts common provider paste formats and strips UI country labels.
+  static String? _preprocess(String? raw) {
+    var value = raw?.trim();
+    if (value == null || value.isEmpty) return null;
+
+    // socks5://user:pass@host:443:Uzbekistan → drop trailing :Label
+    final trailingLabel = RegExp(r'^(.*?://.+?:\d+):([A-Za-z][\w\- ]*)$');
+    final labelMatch = trailingLabel.firstMatch(value);
+    if (labelMatch != null) {
+      value = labelMatch.group(1)!;
+    }
+
+    // host:port:user:pass[:Country]
+    if (!value.contains('://') && !value.contains('@')) {
+      final parts = value.split(':');
+      if (parts.length >= 4 && int.tryParse(parts[1]) != null) {
+        final host = parts[0];
+        final port = parts[1];
+        final user = parts[2];
+        // Last segment is a country label if non-numeric-looking letters-only
+        // and we have 5+ parts; otherwise password is everything after user.
+        String pass;
+        if (parts.length >= 5 && RegExp(r'^[A-Za-z][\w\- ]*$').hasMatch(parts.last)) {
+          pass = parts.sublist(3, parts.length - 1).join(':');
+        } else {
+          pass = parts.sublist(3).join(':');
+        }
+        return 'http://$user:$pass@$host:$port';
+      }
+    }
+
+    // user:pass@host:port
+    if (!value.contains('://') && value.contains('@')) {
+      return 'http://$value';
+    }
+
+    return value;
   }
 }
 

@@ -8,26 +8,47 @@ class NodeRuntime {
 
   static String get _cwd => Directory.current.path;
 
-  static List<String> get _cliCandidates => [
-        '$_cwd${Platform.pathSeparator}tools${Platform.pathSeparator}max_auth${Platform.pathSeparator}cli.mjs',
-        '$_exeDir${Platform.pathSeparator}tools${Platform.pathSeparator}max_auth${Platform.pathSeparator}cli.mjs',
-      ];
+  static String _cliUnder(String root) =>
+      '$root${Platform.pathSeparator}tools${Platform.pathSeparator}max_auth${Platform.pathSeparator}cli.mjs';
 
   static List<String> get _nodeCandidates => [
         '$_exeDir${Platform.pathSeparator}tools${Platform.pathSeparator}node${Platform.pathSeparator}node.exe',
         '$_cwd${Platform.pathSeparator}tools${Platform.pathSeparator}node${Platform.pathSeparator}node.exe',
       ];
 
-  static Future<String?> findCliPath() async {
-    for (final candidate in _cliCandidates) {
-      if (File(candidate).existsSync()) return candidate;
+  /// Walks up from [start] looking for `tools/max_auth/cli.mjs` (Flutter debug cwd is runner/Debug).
+  static String? _findCliWalkingUp(String start) {
+    var dir = Directory(start);
+    for (var i = 0; i < 10; i++) {
+      final candidate = File(_cliUnder(dir.path));
+      if (candidate.existsSync()) return candidate.path;
+      final parent = dir.parent;
+      if (parent.path == dir.path) break;
+      dir = parent;
     }
     return null;
+  }
+
+  static Future<String?> findCliPath() async {
+    for (final root in [_cwd, _exeDir]) {
+      final direct = File(_cliUnder(root));
+      if (direct.existsSync()) return direct.path;
+    }
+    return _findCliWalkingUp(_cwd) ?? _findCliWalkingUp(_exeDir);
   }
 
   /// Absolute path to `node` / `node.exe`, or `null` if none works.
   static Future<String?> findNodeExecutable() async {
     for (final candidate in _nodeCandidates) {
+      if (File(candidate).existsSync() && await _works(candidate)) {
+        return candidate;
+      }
+    }
+    // Absolute install paths help when PATH is stripped under Flutter/Windows.
+    for (final candidate in const [
+      r'C:\Program Files\nodejs\node.exe',
+      r'C:\Program Files (x86)\nodejs\node.exe',
+    ]) {
       if (File(candidate).existsSync() && await _works(candidate)) {
         return candidate;
       }

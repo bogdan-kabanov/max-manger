@@ -2,12 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/automation_rule.dart';
+import '../models/max_account.dart';
 import '../providers/app_state.dart';
 import '../services/browser_session_manager.dart';
 import 'ai_chat_panel.dart';
+import 'map_sidebar/account_map_panel.dart';
 import 'map_sidebar/map_log_panel.dart';
-import 'channel_catalog_panel.dart';
-import 'mother_panel.dart';
 import 'scenario_panel.dart';
 
 class AutomationPanel extends StatefulWidget {
@@ -17,6 +17,19 @@ class AutomationPanel extends StatefulWidget {
 
   @override
   State<AutomationPanel> createState() => _AutomationPanelState();
+}
+
+String _accountProfileLine(MaxAccount account) {
+  final parts = <String>[];
+  final phone = account.phone?.trim();
+  if (phone != null && phone.isNotEmpty) {
+    parts.add(phone);
+  }
+  if (account.viewerId != null) {
+    parts.add('id ${account.viewerId}');
+  }
+  parts.add(account.healthStatus.shortLabel);
+  return parts.join(' · ');
 }
 
 class _AutomationPanelState extends State<AutomationPanel> {
@@ -69,7 +82,15 @@ class _AutomationPanelState extends State<AutomationPanel> {
                   const SizedBox(height: 4),
                   Text(
                     state.selectedAccount!.label,
-                    style: Theme.of(context).textTheme.bodySmall,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    _accountProfileLine(state.selectedAccount!),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                          fontSize: 11,
+                        ),
                   ),
                 ],
               ],
@@ -110,16 +131,16 @@ class _AutomationTabs extends StatelessWidget {
   final VoidCallback onAddRule;
 
   static const _labels = [
+    'Аккаунт',
     'Автоответы',
     'ИИ-бот',
     'Сценарии',
-    'Матка',
-    'Каналы',
   ];
 
   @override
   Widget build(BuildContext context) {
     final browser = context.watch<BrowserSessionManager>();
+    final accountId = state.selectedAccount?.id;
 
     return DefaultTabController(
       length: _labels.length,
@@ -130,8 +151,8 @@ class _AutomationTabs extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Text(
-                'Выберите аккаунт слева — правила и бот привяжутся к нему. '
-                'Группы и чаты — отдельные страницы в меню слева.',
+                'Выберите аккаунт на «Профили» — правила и бот привяжутся к нему. '
+                'Матки — отдельная страница в меню слева.',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
             ),
@@ -139,16 +160,26 @@ class _AutomationTabs extends StatelessWidget {
             isScrollable: true,
             tabAlignment: TabAlignment.start,
             tabs: [
+              Tab(text: 'Аккаунт'),
               Tab(text: 'Автоответы'),
               Tab(text: 'ИИ-бот'),
               Tab(text: 'Сценарии'),
-              Tab(text: 'Матка'),
-              Tab(text: 'Каналы'),
             ],
           ),
           Expanded(
             child: TabBarView(
               children: [
+                accountId != null
+                    ? AccountMapPanel(accountId: accountId)
+                    : const Center(
+                        child: Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text(
+                            'Выберите аккаунт на «Профили»,\nчтобы увидеть телефон, id и статус.',
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ),
                 _AutoReplyTab(
                   state: state,
                   browser: browser,
@@ -159,8 +190,6 @@ class _AutomationTabs extends StatelessWidget {
                 ),
                 const AiChatPanel(),
                 const ScenarioPanel(),
-                const MotherPanel(),
-                const ChannelCatalogPanel(),
               ],
             ),
           ),

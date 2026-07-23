@@ -12,7 +12,16 @@ import '../services/window_launcher.dart';
 import 'bulk_token_import_dialog.dart';
 import 'emulator_panel_dialog.dart';
 import 'map_sidebar/account_chats_tab.dart';
+import 'map_sidebar/map_log_panel.dart';
 import 'map_sidebar/workflow_groups_tab.dart';
+import 'automation_panel.dart';
+import 'channel_catalog_panel.dart';
+import 'funnels_panel.dart';
+import 'join_templates_panel.dart';
+import 'mother_panel.dart';
+import 'pipeline_assign_panel.dart';
+import 'pipeline_journal_panel.dart';
+import 'pipeline_launch_panel.dart';
 import 'registration_guide_dialog.dart';
 import 'sms_account_dialog.dart';
 import 'token_account_dialog.dart';
@@ -23,6 +32,7 @@ export '../models/app_nav_page.dart';
 class AppNavShell extends StatefulWidget {
   const AppNavShell({
     super.key,
+    this.expandContent = false,
     this.onCheckUpdates,
     this.onInstallUpdate,
     this.checkingUpdates = false,
@@ -31,6 +41,8 @@ class AppNavShell extends StatefulWidget {
     this.updateStatus,
   });
 
+  /// When the center map is hidden, grow the page column into that space.
+  final bool expandContent;
   final VoidCallback? onCheckUpdates;
   final VoidCallback? onInstallUpdate;
   final bool checkingUpdates;
@@ -43,25 +55,89 @@ class AppNavShell extends StatefulWidget {
 }
 
 class _AppNavShellState extends State<AppNavShell> {
+  /// Primary rail destinations (index → page). Secondary pages open from «Ещё».
+  static const _railPages = <AppNavPage>[
+    AppNavPage.parse,
+    AppNavPage.assign,
+    AppNavPage.templates,
+    AppNavPage.funnels,
+    AppNavPage.launch,
+    AppNavPage.journal,
+    AppNavPage.profiles,
+    AppNavPage.addAccount,
+    AppNavPage.more,
+  ];
+
+  int _railIndexFor(AppNavPage page) {
+    final i = _railPages.indexOf(page);
+    if (i >= 0) return i;
+    // Secondary tools highlight «Ещё».
+    return _railPages.indexOf(AppNavPage.more);
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final state = context.watch<AppState>();
     final page = state.navPage;
 
-    return LayoutBuilder(
+    final shell = LayoutBuilder(
       builder: (context, constraints) {
         final totalWidth = constraints.maxWidth.isFinite
             ? constraints.maxWidth
             : MediaQuery.sizeOf(context).width;
-        // Groups/Chats need a wider work column than Profiles.
-        final wideWorkPage = page == AppNavPage.groups || page == AppNavPage.chats;
+        final wideWorkPage = page.isWideWorkPage;
         final contentWidth = wideWorkPage
-            ? (totalWidth < 1200 ? 360.0 : 420.0)
+            ? (totalWidth < 1200 ? 360.0 : 440.0)
             : (totalWidth < 1100
                 ? 260.0
                 : (totalWidth < 1400 ? 300.0 : 340.0));
         final extended = totalWidth >= 1500;
+
+        final pageBody = AnimatedSwitcher(
+          duration: const Duration(milliseconds: 180),
+          switchInCurve: Curves.easeOut,
+          switchOutCurve: Curves.easeIn,
+          layoutBuilder: (currentChild, previousChildren) {
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                ...previousChildren,
+                if (currentChild != null) currentChild,
+              ],
+            );
+          },
+          child: KeyedSubtree(
+            key: ValueKey(page),
+            child: switch (page) {
+              AppNavPage.parse => const _ParsePage(),
+              AppNavPage.assign => const _AssignPage(),
+              AppNavPage.templates => const _TemplatesPage(),
+              AppNavPage.funnels => const _FunnelsPage(),
+              AppNavPage.launch => const _LaunchPage(),
+              AppNavPage.journal => const _JournalPage(),
+              AppNavPage.profiles => const _ProfilesPage(),
+              AppNavPage.addAccount => _AddAccountPage(
+                  onCreated: () => context.read<AppState>().setNavPage(AppNavPage.profiles),
+                ),
+              AppNavPage.more => const _MorePage(),
+              AppNavPage.groups => const _GroupsPage(),
+              AppNavPage.chats => const _ChatsPage(),
+              AppNavPage.mother => const _MotherPage(),
+              AppNavPage.automation => const _AutomationPage(),
+              AppNavPage.emulator => const _EmulatorPage(),
+              AppNavPage.help => const _HelpPage(),
+              AppNavPage.about => _AboutPage(
+                  onCheckUpdates: widget.onCheckUpdates,
+                  onInstallUpdate: widget.onInstallUpdate,
+                  checkingUpdates: widget.checkingUpdates,
+                  updateAvailable: widget.updateAvailable,
+                  localVersionLabel: widget.localVersionLabel,
+                  updateStatus: widget.updateStatus,
+                ),
+            },
+          ),
+        );
 
         return Container(
           decoration: BoxDecoration(
@@ -75,88 +151,91 @@ class _AppNavShellState extends State<AppNavShell> {
                 extended: extended,
                 minWidth: 64,
                 minExtendedWidth: 148,
-                selectedIndex: page.index,
+                selectedIndex: _railIndexFor(page),
                 onDestinationSelected: (i) =>
-                    context.read<AppState>().setNavPage(AppNavPage.values[i]),
-                labelType: extended ? NavigationRailLabelType.none : NavigationRailLabelType.all,
+                    context.read<AppState>().setNavPage(_railPages[i]),
+                labelType: extended ? NavigationRailLabelType.none : NavigationRailLabelType.selected,
                 backgroundColor: scheme.surfaceContainerHighest.withValues(alpha: 0.35),
                 leading: Padding(
                   padding: EdgeInsets.only(top: 12, bottom: extended ? 8 : 4),
                   child: _BrandMark(compact: !extended),
                 ),
-                destinations: const [
+                destinations: [
+                  const NavigationRailDestination(
+                    icon: Icon(Icons.travel_explore_outlined),
+                    selectedIcon: Icon(Icons.travel_explore),
+                    label: Text('Парсинг'),
+                  ),
+                  const NavigationRailDestination(
+                    icon: Icon(Icons.bookmark_border),
+                    selectedIcon: Icon(Icons.bookmark),
+                    label: Text('Раздача'),
+                  ),
+                  const NavigationRailDestination(
+                    icon: Icon(Icons.description_outlined),
+                    selectedIcon: Icon(Icons.description),
+                    label: Text('Шаблоны'),
+                  ),
+                  const NavigationRailDestination(
+                    icon: Icon(Icons.filter_alt_outlined),
+                    selectedIcon: Icon(Icons.filter_alt),
+                    label: Text('Воронки'),
+                  ),
+                  const NavigationRailDestination(
+                    icon: Icon(Icons.play_circle_outline),
+                    selectedIcon: Icon(Icons.play_circle),
+                    label: Text('Запуск'),
+                  ),
                   NavigationRailDestination(
+                    icon: Badge(
+                      isLabelVisible: state.runningActionsCount > 0,
+                      label: Text('${state.runningActionsCount}'),
+                      child: const Icon(Icons.history_outlined),
+                    ),
+                    selectedIcon: Badge(
+                      isLabelVisible: state.runningActionsCount > 0,
+                      label: Text('${state.runningActionsCount}'),
+                      child: const Icon(Icons.history),
+                    ),
+                    label: const Text('Журнал'),
+                  ),
+                  const NavigationRailDestination(
                     icon: Icon(Icons.people_outline),
                     selectedIcon: Icon(Icons.people),
                     label: Text('Профили'),
                   ),
-                  NavigationRailDestination(
+                  const NavigationRailDestination(
                     icon: Icon(Icons.person_add_alt_outlined),
                     selectedIcon: Icon(Icons.person_add_alt_1),
                     label: Text('Вход'),
                   ),
-                  NavigationRailDestination(
-                    icon: Icon(Icons.folder_outlined),
-                    selectedIcon: Icon(Icons.folder),
-                    label: Text('Группы'),
-                  ),
-                  NavigationRailDestination(
-                    icon: Icon(Icons.chat_bubble_outline),
-                    selectedIcon: Icon(Icons.chat_bubble),
-                    label: Text('Чаты'),
-                  ),
-                  NavigationRailDestination(
-                    icon: Icon(Icons.phone_android_outlined),
-                    selectedIcon: Icon(Icons.phone_android),
-                    label: Text('Эмулятор'),
-                  ),
-                  NavigationRailDestination(
-                    icon: Icon(Icons.help_outline),
-                    selectedIcon: Icon(Icons.help),
-                    label: Text('Справка'),
-                  ),
-                  NavigationRailDestination(
-                    icon: Icon(Icons.info_outline),
-                    selectedIcon: Icon(Icons.info),
-                    label: Text('О приложении'),
+                  const NavigationRailDestination(
+                    icon: Icon(Icons.more_horiz),
+                    selectedIcon: Icon(Icons.more_horiz),
+                    label: Text('Ещё'),
                   ),
                 ],
               ),
               VerticalDivider(width: 1, color: Theme.of(context).dividerColor),
-              SizedBox(
-                width: contentWidth,
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 180),
-                  switchInCurve: Curves.easeOut,
-                  switchOutCurve: Curves.easeIn,
-                  child: KeyedSubtree(
-                    key: ValueKey(page),
-                    child: switch (page) {
-                      AppNavPage.profiles => const _ProfilesPage(),
-                      AppNavPage.addAccount => _AddAccountPage(
-                          onCreated: () => context.read<AppState>().setNavPage(AppNavPage.profiles),
-                        ),
-                      AppNavPage.groups => const _GroupsPage(),
-                      AppNavPage.chats => const _ChatsPage(),
-                      AppNavPage.emulator => const _EmulatorPage(),
-                      AppNavPage.help => const _HelpPage(),
-                      AppNavPage.about => _AboutPage(
-                          onCheckUpdates: widget.onCheckUpdates,
-                          onInstallUpdate: widget.onInstallUpdate,
-                          checkingUpdates: widget.checkingUpdates,
-                          updateAvailable: widget.updateAvailable,
-                          localVersionLabel: widget.localVersionLabel,
-                          updateStatus: widget.updateStatus,
-                        ),
-                    },
+              if (widget.expandContent)
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.topLeft,
+                    child: SizedBox(
+                      width: contentWidth,
+                      child: pageBody,
+                    ),
                   ),
-                ),
-              ),
+                )
+              else
+                SizedBox(width: contentWidth, child: pageBody),
             ],
           ),
         );
       },
     );
+
+    return shell;
   }
 }
 
@@ -181,17 +260,17 @@ class _BrandMark extends StatelessWidget {
     if (compact) return badge;
 
     return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
         badge,
         const SizedBox(width: 10),
-        const Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('MAX Desktop', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
-              Text('web.max.ru', style: TextStyle(fontSize: 11, color: Colors.white60)),
-            ],
-          ),
+        const Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('MAX Desktop', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+            Text('web.max.ru', style: TextStyle(fontSize: 11, color: Colors.white60)),
+          ],
         ),
       ],
     );
@@ -220,6 +299,88 @@ class _GroupsPage extends StatelessWidget {
   }
 }
 
+class _ParsePage extends StatelessWidget {
+  const _ParsePage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(16, 16, 16, 0),
+          child: Text(
+            'Парсинг',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+          ),
+        ),
+        Expanded(child: ChannelCatalogPanel(key: ValueKey('nav-parse'))),
+      ],
+    );
+  }
+}
+
+class _AssignPage extends StatelessWidget {
+  const _AssignPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const PipelineAssignPanel(key: ValueKey('nav-assign'));
+  }
+}
+
+class _LaunchPage extends StatelessWidget {
+  const _LaunchPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const PipelineLaunchPanel(key: ValueKey('nav-launch'));
+  }
+}
+
+class _JournalPage extends StatelessWidget {
+  const _JournalPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const PipelineJournalPanel(key: ValueKey('nav-journal'));
+  }
+}
+
+class _MorePage extends StatelessWidget {
+  const _MorePage();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    Widget tile(IconData icon, String title, String subtitle, AppNavPage page) {
+      return ListTile(
+        leading: Icon(icon),
+        title: Text(title),
+        subtitle: Text(subtitle, style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant)),
+        onTap: () => context.read<AppState>().setNavPage(page),
+      );
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(8, 16, 8, 24),
+      children: [
+        const Padding(
+          padding: EdgeInsets.fromLTRB(8, 0, 8, 12),
+          child: Text('Ещё', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+        ),
+        tile(Icons.hive_outlined, 'Матка (расширенно)', 'Старые режимы join/invite/forward', AppNavPage.mother),
+        tile(Icons.folder_outlined, 'Группы на карте', 'Workflow-группы выбранного аккаунта', AppNavPage.groups),
+        tile(Icons.chat_bubble_outline, 'Чаты', 'Каталог чатов MAX по маткам', AppNavPage.chats),
+        tile(Icons.smart_toy_outlined, 'Авто', 'Автоответы, ИИ, сценарии', AppNavPage.automation),
+        tile(Icons.phone_android_outlined, 'Эмулятор', 'AVD / зеркало', AppNavPage.emulator),
+        tile(Icons.help_outline, 'Справка', 'Регистрация и QR', AppNavPage.help),
+        tile(Icons.info_outline, 'О приложении', 'Версия и обновления', AppNavPage.about),
+      ],
+    );
+  }
+}
+
 class _ChatsPage extends StatelessWidget {
   const _ChatsPage();
 
@@ -230,6 +391,64 @@ class _ChatsPage extends StatelessWidget {
       key: ValueKey('nav-chats-${state.selectedAccount?.id ?? 'all'}'),
       focusAccountId: state.selectedAccount?.id,
     );
+  }
+}
+
+class _MotherPage extends StatelessWidget {
+  const _MotherPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Text('Матка (расширенно)', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+        ),
+        Expanded(child: MotherPanel(embedded: false)),
+        MapLogPanel(),
+      ],
+    );
+  }
+}
+
+class _TemplatesPage extends StatelessWidget {
+  const _TemplatesPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(child: JoinTemplatesPanel(key: ValueKey('nav-templates'))),
+        MapLogPanel(),
+      ],
+    );
+  }
+}
+
+class _FunnelsPage extends StatelessWidget {
+  const _FunnelsPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(child: FunnelsPanel(key: ValueKey('nav-funnels'))),
+        MapLogPanel(),
+      ],
+    );
+  }
+}
+
+class _AutomationPage extends StatelessWidget {
+  const _AutomationPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const AutomationPanel(fullWidth: true);
   }
 }
 
@@ -308,7 +527,8 @@ class _ProfilesPageState extends State<_ProfilesPage> {
                     Text('Профили', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18)),
                     SizedBox(height: 2),
                     Text(
-                      'Изолированные сессии web.max.ru',
+                      'Имя, фамилия, телефон — после «Инфо» или «Проверить статусы». '
+                      'При выборе непроверенного аккаунта подтянется само.',
                       style: TextStyle(fontSize: 12, color: Colors.white60),
                     ),
                   ],
@@ -397,7 +617,7 @@ class _ProfileCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      account.label,
+                      account.profileDisplayName,
                       style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -424,6 +644,12 @@ class _ProfileCard extends StatelessWidget {
                           label: _hasProxy(account) ? 'прокси' : 'без прокси',
                           ok: _hasProxy(account),
                         ),
+                        if (account.phone?.trim().isNotEmpty == true)
+                          _StatusBadge(
+                            label: account.phone!.trim(),
+                            ok: true,
+                            neutral: true,
+                          ),
                         if (account.viewerId != null)
                           _StatusBadge(
                             label: 'id ${account.viewerId}',
@@ -580,7 +806,7 @@ class _SelectedAccountActionsState extends State<_SelectedAccountActions> {
             children: [
               Expanded(
                 child: Text(
-                  account.label,
+                  account.profileDisplayName,
                   style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -618,6 +844,40 @@ class _SelectedAccountActionsState extends State<_SelectedAccountActions> {
           _InfoGrid(
             rows: [
               _InfoRow(
+                label: 'имя',
+                value: (account.firstName?.trim().isNotEmpty == true)
+                    ? account.firstName!.trim()
+                    : '—',
+                onCopy: account.firstName?.trim().isNotEmpty == true
+                    ? () => _copy('Имя', account.firstName!.trim())
+                    : null,
+              ),
+              _InfoRow(
+                label: 'фамилия',
+                value: (account.lastName?.trim().isNotEmpty == true)
+                    ? account.lastName!.trim()
+                    : '—',
+                onCopy: account.lastName?.trim().isNotEmpty == true
+                    ? () => _copy('Фамилия', account.lastName!.trim())
+                    : null,
+              ),
+              _InfoRow(
+                label: 'описание',
+                value: (account.description?.trim().isNotEmpty == true)
+                    ? account.description!.trim()
+                    : '—',
+                onCopy: account.description?.trim().isNotEmpty == true
+                    ? () => _copy('Описание', account.description!.trim())
+                    : null,
+              ),
+              _InfoRow(
+                label: 'телефон',
+                value: (account.phone?.trim().isNotEmpty == true) ? account.phone!.trim() : '—',
+                onCopy: account.phone?.trim().isNotEmpty == true
+                    ? () => _copy('Телефон', account.phone!.trim())
+                    : null,
+              ),
+              _InfoRow(
                 label: 'статус',
                 value: account.healthStatus.longLabel +
                     (account.lastCheckedAt != null
@@ -631,13 +891,6 @@ class _SelectedAccountActionsState extends State<_SelectedAccountActions> {
                 value: account.viewerId?.toString() ?? '—',
                 onCopy: account.viewerId != null
                     ? () => _copy('viewerId', '${account.viewerId}')
-                    : null,
-              ),
-              _InfoRow(
-                label: 'телефон',
-                value: (account.phone?.trim().isNotEmpty == true) ? account.phone!.trim() : '—',
-                onCopy: account.phone?.trim().isNotEmpty == true
-                    ? () => _copy('Телефон', account.phone!.trim())
                     : null,
               ),
               _InfoRow(label: 'вход', value: _authLabel()),
@@ -1386,7 +1639,7 @@ Future<void> _showIsolationDialog(BuildContext context, MaxAccount account) asyn
                   controller: proxyController,
                   decoration: const InputDecoration(
                     labelText: 'Прокси (SOCKS5 / HTTP)',
-                    hintText: 'socks5://user:pass@host:port',
+                    hintText: 'http://user:pass@host:port  или  host:port:user:pass',
                   ),
                 ),
                 const SizedBox(height: 8),

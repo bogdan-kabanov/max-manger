@@ -85,6 +85,9 @@ class AccountIsolation {
     if (proxy != null && proxy.isNotEmpty) {
       final parsed = ParsedProxy.tryParse(proxy);
       parts.add('--proxy-server=${_escape(parsed?.chromiumProxyServer ?? proxy)}');
+      if (parsed != null) {
+        parts.addAll(parsed.chromiumAuthArguments);
+      }
     }
     return parts.join(' ');
   }

@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
+import '../providers/app_state.dart';
 import '../services/app_update_service.dart';
 import '../widgets/app_nav_shell.dart';
-import '../widgets/automation_panel.dart';
 import '../widgets/hub_center_panel.dart';
 
 /// Главное рабочее пространство: web + встроенный эмулятор + автоматизация.
@@ -137,6 +138,7 @@ class _HubScreenState extends State<HubScreen> {
   @override
   Widget build(BuildContext context) {
     final update = _availableUpdate;
+    final showMap = context.watch<AppState>().navPage.showsAccountMap;
     return Scaffold(
       body: Column(
         children: [
@@ -175,16 +177,23 @@ class _HubScreenState extends State<HubScreen> {
           Expanded(
             child: Row(
               children: [
-                AppNavShell(
-                  onCheckUpdates: () => _checkUpdates(silent: false),
-                  onInstallUpdate: update == null ? null : () => _promptUpdate(update),
-                  checkingUpdates: _checkingUpdate,
-                  updateAvailable: update != null,
-                  localVersionLabel: _localVersionLabel,
-                  updateStatus: _updateStatus,
+                // Same slot in the tree when map toggles — avoids tearing down
+                // Provider dependents (red screen: `_dependents.isEmpty`).
+                Flexible(
+                  flex: showMap ? 0 : 1,
+                  fit: showMap ? FlexFit.loose : FlexFit.tight,
+                  child: AppNavShell(
+                    expandContent: !showMap,
+                    onCheckUpdates: () => _checkUpdates(silent: false),
+                    onInstallUpdate: update == null ? null : () => _promptUpdate(update),
+                    checkingUpdates: _checkingUpdate,
+                    updateAvailable: update != null,
+                    localVersionLabel: _localVersionLabel,
+                    updateStatus: _updateStatus,
+                  ),
                 ),
-                const Expanded(child: HubCenterPanel()),
-                const AutomationPanel(),
+                // Map only on home («Профили»); all work tools are left-rail pages.
+                if (showMap) const Expanded(child: HubCenterPanel()),
               ],
             ),
           ),

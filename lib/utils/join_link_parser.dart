@@ -20,7 +20,7 @@ class JoinLinkParser {
     for (final line in text.split(RegExp(r'[\r\n]+'))) {
       final trimmed = line.trim();
       if (trimmed.isEmpty || trimmed.contains('max.ru')) continue;
-      if (_hashRe.hasMatch(trimmed) && trimmed.length >= 16 && seen.add(trimmed)) {
+      if (_hashRe.hasMatch(trimmed) && trimmed.length >= 8 && seen.add(trimmed)) {
         result.add(trimmed);
       }
     }

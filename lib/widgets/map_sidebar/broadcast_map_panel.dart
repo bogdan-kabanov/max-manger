@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../../models/map_workflow.dart';
+import '../../models/max_account.dart';
 import '../../providers/app_state.dart';
 import 'map_chat_checkbox_list.dart';
 
@@ -237,7 +238,9 @@ class _BroadcastMapPanelState extends State<BroadcastMapPanel> {
                           minLines: 2,
                           maxLines: 6,
                           decoration: const InputDecoration(
-                            hintText: 'Текст сообщения…',
+                            hintText:
+                                'Текст… Ссылка: [Вступить](https://max.ru/join/…)',
+                            helperText: 'Скрытая ссылка: [текст](https://…)',
                             border: OutlineInputBorder(),
                           ),
                         ),

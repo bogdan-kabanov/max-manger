@@ -19,11 +19,13 @@ Future<void> main(List<String> args) async {
   await windowManager.ensureInitialized();
 
   final windowController = await WindowController.fromCurrentEngine();
-  await windowController.initWindowManagerHandlers();
-
   final windowArgs = WindowArguments.fromString(windowController.arguments);
+  final isSubWindow = !windowArgs.isMain;
 
-  if (!windowArgs.isMain) {
+  await windowController.initWindowManagerHandlers(closeAsHide: isSubWindow);
+
+  if (isSubWindow) {
+    await SubWindowCloseGuard.install();
     await StorageService.instance.init();
     final accountLabel = _accountLabel(windowArgs.accountId);
     switch (windowArgs.type) {

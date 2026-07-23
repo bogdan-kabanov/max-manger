@@ -126,6 +126,7 @@ class _BulkTokenImportDialogState extends State<BulkTokenImportDialog> {
         ({
           String apiToken,
           String? label,
+          String? phone,
           int? viewerId,
           String? deviceId,
           AccountHealthStatus healthStatus,
@@ -144,10 +145,12 @@ class _BulkTokenImportDialogState extends State<BulkTokenImportDialog> {
       if (_verify) {
         setState(() => _status = 'Проверка ${i + 1}/${okRows.length}: ${row.sourceName}');
         final result = await MaxAuthService.verifyToken(token, proxy: _proxy);
+        final phone = result.profilePhone ?? result.phone;
         if (result.ok) {
           toCreate.add((
             apiToken: token,
             label: result.profileName ?? _labelFor(row, i),
+            phone: phone,
             viewerId: row.snippet.viewerId ?? result.profileId,
             deviceId: row.snippet.deviceId,
             healthStatus: AccountHealthStatus.ok,
@@ -156,6 +159,7 @@ class _BulkTokenImportDialogState extends State<BulkTokenImportDialog> {
           toCreate.add((
             apiToken: token,
             label: _labelFor(row, i),
+            phone: phone,
             viewerId: row.snippet.viewerId,
             deviceId: row.snippet.deviceId,
             healthStatus: AccountHealthStatus.networkError,
@@ -164,6 +168,7 @@ class _BulkTokenImportDialogState extends State<BulkTokenImportDialog> {
           toCreate.add((
             apiToken: token,
             label: result.profileName ?? _labelFor(row, i),
+            phone: phone,
             viewerId: row.snippet.viewerId ?? result.profileId,
             deviceId: row.snippet.deviceId,
             healthStatus: AccountHealthStatus.banned,
@@ -175,6 +180,7 @@ class _BulkTokenImportDialogState extends State<BulkTokenImportDialog> {
         toCreate.add((
           apiToken: token,
           label: _labelFor(row, i),
+          phone: null,
           viewerId: row.snippet.viewerId,
           deviceId: row.snippet.deviceId,
           healthStatus: AccountHealthStatus.unknown,

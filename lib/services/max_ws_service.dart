@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 
+import '../utils/message_link_markup.dart';
 import 'proxy_support.dart';
 
 class MaxIncomingMessage {
@@ -178,13 +179,18 @@ class MaxWsService extends ChangeNotifier {
     if (!_loggedIn || _socket == null) {
       throw StateError('WS не подключён');
     }
-    _log('[WS] → отправка в чат $chatId: ${text.length > 60 ? '${text.substring(0, 60)}…' : text}');
+    final parsed = parseMessageWithLinks(text);
+    final preview = parsed.text.length > 60 ? '${parsed.text.substring(0, 60)}…' : parsed.text;
+    _log(
+      '[WS] → отправка в чат $chatId: $preview'
+      '${parsed.elements.isEmpty ? '' : ' (${parsed.elements.length} ссыл.)'}',
+    );
     await _invoke(_sendMessageOpcode, {
       'chatId': int.tryParse(chatId) ?? chatId,
       'message': {
-        'text': text,
+        'text': parsed.text,
         'cid': _randomCid(),
-        'elements': <dynamic>[],
+        'elements': parsed.elements,
         'attaches': <dynamic>[],
       },
       'notify': true,

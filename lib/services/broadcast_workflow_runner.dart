@@ -1,7 +1,9 @@
 import 'dart:async';
 
+import '../models/active_action.dart';
 import '../models/map_workflow.dart';
 import '../models/max_account.dart';
+import '../models/rate_settings.dart';
 import 'max_ws_service.dart';
 
 typedef BroadcastLog = void Function(String message, {String level});
@@ -9,6 +11,7 @@ typedef BroadcastLog = void Function(String message, {String level});
 class BroadcastWorkflowRunner {
   final Map<String, MaxWsService> _wsByAccount = {};
   final Map<String, Timer> _timers = {};
+  RateSettings _rateSettings = RateSettings.defaults;
 
   void dispose() {
     for (final timer in _timers.values) {
@@ -26,7 +29,10 @@ class BroadcastWorkflowRunner {
     required List<WorkflowMapEdge> edges,
     required List<MaxAccount> accounts,
     required BroadcastLog onLog,
+    RateSettings rateSettings = RateSettings.defaults,
+    Future<void> Function(MapWorkflowNode node)? onScheduledRun,
   }) {
+    _rateSettings = rateSettings;
     final desired = <String>{};
     for (final node in nodes) {
       if (!node.isBroadcast) continue;
@@ -38,12 +44,17 @@ class BroadcastWorkflowRunner {
 
       final interval = Duration(minutes: cfg.intervalMinutes);
       _timers[node.id] = Timer.periodic(interval, (_) {
-        unawaited(runBroadcast(
-          node: node,
-          edges: edges,
-          accounts: accounts,
-          onLog: onLog,
-        ));
+        if (onScheduledRun != null) {
+          unawaited(onScheduledRun(node));
+        } else {
+          unawaited(runBroadcast(
+            node: node,
+            edges: edges,
+            accounts: accounts,
+            rateSettings: _rateSettings,
+            onLog: onLog,
+          ));
+        }
       });
       onLog('[Рассылка] «${node.title}» — таймер каждые ${cfg.intervalMinutes} мин');
     }
@@ -71,6 +82,9 @@ class BroadcastWorkflowRunner {
     required List<WorkflowMapEdge> edges,
     required List<MaxAccount> accounts,
     required BroadcastLog onLog,
+    RateSettings rateSettings = RateSettings.defaults,
+    ActionCancelToken? cancel,
+    void Function(String message, {int? done, int? total})? onProgress,
   }) async {
     if (!node.isBroadcast) return;
     final cfg = node.broadcast;
@@ -101,32 +115,79 @@ class BroadcastWorkflowRunner {
       return;
     }
 
-    onLog('[Рассылка] «${node.title}» — старт (${cfg.steps.length} сообщ., ${cfg.targetChats.length} чатов)');
+    final uzbek = account.isUzbek;
+    final messageDelayFloor = uzbek ? rateSettings.uzbekMessageDelayMs : 0;
+    final chatGapMs = uzbek ? rateSettings.uzbekChatGapMs : 800;
+    final totalSteps = cfg.targetChats.length * cfg.steps.length;
+    var done = 0;
+
+    onLog(
+      '[Рассылка] «${node.title}» — старт (${cfg.steps.length} сообщ., ${cfg.targetChats.length} чатов)'
+      '${uzbek ? ' · узб пауза ${rateSettings.uzbekMessageDelayMs}мс / чаты $chatGapMsмс' : ''}',
+    );
+    onProgress?.call('Старт…', done: 0, total: totalSteps);
 
     try {
       final ws = await _wsFor(account, cfg.targetChats, onLog);
       for (final target in cfg.targetChats) {
+        if (cancel?.isCancelled == true) {
+          onLog('[Рассылка] «${node.title}» — остановлено', level: 'warn');
+          onProgress?.call('Остановлено', done: done, total: totalSteps);
+          return;
+        }
         for (var i = 0; i < cfg.steps.length; i++) {
+          if (cancel?.isCancelled == true) {
+            onLog('[Рассылка] «${node.title}» — остановлено', level: 'warn');
+            onProgress?.call('Остановлено', done: done, total: totalSteps);
+            return;
+          }
           final step = cfg.steps[i];
           final text = step.text.trim();
-          if (text.isEmpty) continue;
+          if (text.isEmpty) {
+            done += 1;
+            continue;
+          }
           try {
             await ws.sendToTargetChat(target, text);
             onLog('[Рассылка] ✓ «$target» — сообщение ${i + 1}/${cfg.steps.length}');
           } catch (e) {
             onLog('[Рассылка] ✗ «$target»: $e', level: 'error');
           }
-          if (i < cfg.steps.length - 1 && step.delayAfterMs > 0) {
-            await Future<void>.delayed(Duration(milliseconds: step.delayAfterMs));
+          done += 1;
+          onProgress?.call(
+            '«$target» · ${i + 1}/${cfg.steps.length}',
+            done: done,
+            total: totalSteps,
+          );
+          if (i < cfg.steps.length - 1) {
+            final delay = step.delayAfterMs > messageDelayFloor
+                ? step.delayAfterMs
+                : messageDelayFloor;
+            if (delay > 0) {
+              await delayUnlessCancelled(
+                Duration(milliseconds: delay),
+                token: cancel,
+              );
+            }
           }
         }
-        if (cfg.targetChats.length > 1) {
-          await Future<void>.delayed(const Duration(milliseconds: 800));
+        if (cfg.targetChats.length > 1 && chatGapMs > 0) {
+          await delayUnlessCancelled(
+            Duration(milliseconds: chatGapMs),
+            token: cancel,
+          );
         }
       }
+      if (cancel?.isCancelled == true) {
+        onLog('[Рассылка] «${node.title}» — остановлено', level: 'warn');
+        onProgress?.call('Остановлено', done: done, total: totalSteps);
+        return;
+      }
       onLog('[Рассылка] «${node.title}» — готово');
+      onProgress?.call('Готово', done: done, total: totalSteps);
     } catch (e) {
       onLog('[Рассылка] «${node.title}» — ошибка: $e', level: 'error');
+      onProgress?.call('Ошибка: $e', done: done, total: totalSteps);
     }
   }
 

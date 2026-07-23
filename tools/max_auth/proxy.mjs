@@ -42,8 +42,14 @@ export async function withProxy(proxy, fn) {
  */
 export function normalizeProxyUrl(raw) {
   if (raw == null) return null;
-  const value = String(raw).trim();
+  let value = String(raw).trim();
   if (!value) return null;
+
+  // scheme://user:pass@host:port:CountryLabel → drop trailing label
+  const trailingLabel = /^(.*?:\/\/.+?:\d+):([A-Za-z][\w\- ]*)$/.exec(value);
+  if (trailingLabel) {
+    value = trailingLabel[1];
+  }
 
   if (/^(https?|socks4a?|socks5h?):\/\//i.test(value)) {
     return value;
@@ -52,12 +58,29 @@ export function normalizeProxyUrl(raw) {
   if (/^[^:]+:\d+$/.test(value)) {
     return `http://${value}`;
   }
+  // host:port:user:pass[:Country]
+  const colonParts = value.split(':');
+  if (!value.includes('@') && colonParts.length >= 4 && /^\d+$/.test(colonParts[1])) {
+    const host = colonParts[0];
+    const port = colonParts[1];
+    const user = colonParts[2];
+    let pass;
+    if (
+      colonParts.length >= 5 &&
+      /^[A-Za-z][\w\- ]*$/.test(colonParts[colonParts.length - 1])
+    ) {
+      pass = colonParts.slice(3, -1).join(':');
+    } else {
+      pass = colonParts.slice(3).join(':');
+    }
+    return `http://${user}:${pass}@${host}:${port}`;
+  }
   // user:pass@host:port
   if (/^.+@.+:\d+$/.test(value)) {
     return `http://${value}`;
   }
   throw new Error(
-    `Некорректный прокси. Примеры: http://127.0.0.1:8080, http://user:pass@host:port, socks5://127.0.0.1:1080`,
+    `Некорректный прокси. Примеры: http://user:pass@host:port, host:port:user:pass, socks5://127.0.0.1:1080`,
   );
 }
 

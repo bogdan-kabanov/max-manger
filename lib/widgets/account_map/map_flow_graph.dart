@@ -22,7 +22,11 @@ class MapFlowGraphBuilder {
     ];
 
     final connections = <Connection<void>>[
-      for (final edge in state.accountMap.edges)
+      // Mother → child always from live clusters (not stale stored edges).
+      for (final edge in state.accountMap.edgesFromClusters())
+        if (accountIds.contains(edge.fromAccountId) && accountIds.contains(edge.toAccountId))
+          _motherChildEdge(edge),
+      for (final edge in state.accountMap.edges.where((e) => e.type != AccountMapEdgeType.motherChild))
         if (accountIds.contains(edge.fromAccountId) && accountIds.contains(edge.toAccountId))
           _accountEdge(edge),
       for (final edge in state.workflowEdges.where((e) => e.kind == WorkflowEdgeKind.owner))
@@ -55,12 +59,16 @@ class MapFlowGraphBuilder {
               '${b?.senderAccountId}:${b?.targetChats.length}';
         })
         .join(';');
-    final accountEdges = state.accountMap.edges.map((e) => e.key).join(';');
+    final accountEdges = state.accountMap.edgesFromClusters().map((e) => e.key).join(';');
+    final otherAccountEdges = state.accountMap.edges
+        .where((e) => e.type != AccountMapEdgeType.motherChild)
+        .map((e) => e.key)
+        .join(';');
     final workflowEdges = state.workflowEdges.map((e) => e.key).join(';');
     final roles = state.motherClusters
         .map((c) => '${c.id}:${c.motherAccountId ?? ''}>${c.childAccountIds.join(',')}')
         .join('|');
-    return '$accounts|$workflows|$accountEdges|$workflowEdges|$roles';
+    return '$accounts|$workflows|$accountEdges|$otherAccountEdges|$workflowEdges|$roles';
   }
 
   static Node<MapFlowNodeData> _accountNode(String accountId, Offset position) {
@@ -153,9 +161,26 @@ class MapFlowGraphBuilder {
     ];
   }
 
+  static Connection<void> _motherChildEdge(AccountMapEdge edge) {
+    return Connection<void>(
+      id: edge.key,
+      sourceNodeId: edge.fromAccountId,
+      sourcePortId: 'out',
+      targetNodeId: edge.toAccountId,
+      targetPortId: 'in',
+      color: const Color(0xFFFF9800),
+      selectedColor: const Color(0xFFFFB74D),
+      strokeWidth: 3.5,
+      selectedStrokeWidth: 4.5,
+      style: ConnectionStyles.smoothstep,
+      label: ConnectionLabel.center(text: 'матка'),
+      endPoint: ConnectionEndPoint.triangle,
+    );
+  }
+
   static Connection<void> _accountEdge(AccountMapEdge edge) {
     final color = switch (edge.type) {
-      AccountMapEdgeType.motherChild => Colors.orangeAccent,
+      AccountMapEdgeType.motherChild => const Color(0xFFFF9800),
       AccountMapEdgeType.forwardLink => Colors.lightBlueAccent,
       AccountMapEdgeType.message => Colors.purpleAccent,
     };
@@ -165,7 +190,8 @@ class MapFlowGraphBuilder {
       sourcePortId: 'out',
       targetNodeId: edge.toAccountId,
       targetPortId: 'in',
-      color: color.withValues(alpha: 0.7),
+      color: color.withValues(alpha: 0.9),
+      strokeWidth: edge.type == AccountMapEdgeType.motherChild ? 3.5 : 2,
       style: ConnectionStyles.smoothstep,
     );
   }

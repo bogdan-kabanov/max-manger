@@ -123,7 +123,13 @@ class BrowserSessionManager extends ChangeNotifier {
         _log('Сессия по токену подставлена в web.max.ru');
       }
     } on PlatformException catch (e) {
-      error = e.message ?? 'Не удалось открыть браузер';
+      if (e.code == 'unsupported_platform') {
+        error =
+            'WebView2 недоступен в этом окне (DispatcherQueue). '
+            'Закройте другие Web-окна и попробуйте снова, либо откройте аккаунт в главном окне.';
+      } else {
+        error = e.message ?? 'Не удалось открыть браузер';
+      }
       _log(error!, level: 'error');
     } catch (e) {
       error = e.toString();
@@ -391,7 +397,16 @@ class BrowserSessionManager extends ChangeNotifier {
             }
           }
         case 'macro.done':
-          _log('Сценарий завершён');
+          if (payload is Map && payload['ok'] == false) {
+            final failed = payload['failed'];
+            _log(
+              'Сценарий НЕ выполнен'
+              '${failed != null ? ' (ошибок: $failed)' : ''} — сообщения могли не уйти',
+              level: 'error',
+            );
+          } else {
+            _log('Сценарий завершён');
+          }
         case 'macro.picked':
           if (payload is Map) {
             if (payload['ok'] == true) {
@@ -449,6 +464,7 @@ class BrowserSessionManager extends ChangeNotifier {
     if (logs.length > 500) {
       logs.removeRange(500, logs.length);
     }
+    notifyListeners();
   }
 
   @override

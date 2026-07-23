@@ -9,6 +9,7 @@ class MaxChannelCatalogEntry {
     this.topic,
     this.source,
     this.discoveredAt,
+    this.assignedMotherAccountId,
   });
 
   final String chatId;
@@ -19,9 +20,39 @@ class MaxChannelCatalogEntry {
   final String? source;
   final DateTime? discoveredAt;
 
+  /// Soft assignment: which matka owns this group before any join.
+  final String? assignedMotherAccountId;
+
   bool get hasInviteLink => MotherGroupChannel.isValidInviteHash(inviteHash);
 
   String? get inviteUrl => hasInviteLink ? 'https://max.ru/join/$inviteHash' : null;
+
+  bool get isAssigned =>
+      assignedMotherAccountId != null && assignedMotherAccountId!.trim().isNotEmpty;
+
+  MaxChannelCatalogEntry copyWith({
+    String? title,
+    String? type,
+    String? inviteHash,
+    String? topic,
+    String? source,
+    DateTime? discoveredAt,
+    String? assignedMotherAccountId,
+    bool clearAssignment = false,
+  }) {
+    return MaxChannelCatalogEntry(
+      chatId: chatId,
+      title: title ?? this.title,
+      type: type ?? this.type,
+      inviteHash: inviteHash ?? this.inviteHash,
+      topic: topic ?? this.topic,
+      source: source ?? this.source,
+      discoveredAt: discoveredAt ?? this.discoveredAt,
+      assignedMotherAccountId: clearAssignment
+          ? null
+          : (assignedMotherAccountId ?? this.assignedMotherAccountId),
+    );
+  }
 
   Map<String, dynamic> toJson() => {
         'chatId': chatId,
@@ -31,9 +62,12 @@ class MaxChannelCatalogEntry {
         if (topic != null) 'topic': topic,
         if (source != null) 'source': source,
         if (discoveredAt != null) 'discoveredAt': discoveredAt!.toIso8601String(),
+        if (assignedMotherAccountId != null)
+          'assignedMotherAccountId': assignedMotherAccountId,
       };
 
   factory MaxChannelCatalogEntry.fromJson(Map<String, dynamic> json) {
+    final assigned = json['assignedMotherAccountId']?.toString().trim();
     return MaxChannelCatalogEntry(
       chatId: json['chatId']?.toString() ?? '',
       title: json['title']?.toString() ?? 'Без названия',
@@ -43,6 +77,7 @@ class MaxChannelCatalogEntry {
       source: json['source']?.toString(),
       discoveredAt:
           json['discoveredAt'] != null ? DateTime.tryParse(json['discoveredAt'].toString()) : null,
+      assignedMotherAccountId: (assigned != null && assigned.isNotEmpty) ? assigned : null,
     );
   }
 
@@ -93,6 +128,9 @@ class MaxChannelCatalogEntry {
         topic: entry.topic ?? prev.topic,
         source: entry.source ?? prev.source,
         discoveredAt: entry.discoveredAt ?? prev.discoveredAt ?? DateTime.now(),
+        // Preserve soft assignment unless incoming explicitly sets one.
+        assignedMotherAccountId:
+            entry.assignedMotherAccountId ?? prev.assignedMotherAccountId,
       );
       final merged = byId[entry.chatId]!;
       if (merged.hasInviteLink) byHash[merged.inviteHash!] = merged;

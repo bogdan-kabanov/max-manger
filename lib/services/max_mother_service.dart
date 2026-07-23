@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import '../models/active_action.dart';
 import '../models/max_channel_catalog_entry.dart';
 import '../models/mother_group_channel.dart';
 import 'node_runtime.dart';
@@ -166,6 +167,7 @@ class MaxMotherService {
     bool childrenJoin = true,
     String? proxy,
     MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
   }) async {
     return _run(
       'mother-deploy',
@@ -185,6 +187,7 @@ class MaxMotherService {
       },
       onProgress: onProgress,
       proxy: proxy,
+      cancel: cancel,
     );
   }
 
@@ -193,6 +196,7 @@ class MaxMotherService {
     bool scanMessages = true,
     String? proxy,
     MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
   }) async {
     final json = await _runRaw(
       'list-groups',
@@ -202,6 +206,7 @@ class MaxMotherService {
       },
       onProgress: onProgress,
       proxy: proxy,
+      cancel: cancel,
     );
     if (json == null) {
       return MotherGroupsResult(ok: false, message: 'Пустой ответ CLI');
@@ -215,20 +220,25 @@ class MaxMotherService {
     List<String> topics = const [],
     List<String> excludeHashes = const [],
     List<String> excludeChatIds = const [],
+    /// chats = можно писать, channels = лента, all = оба
+    String kind = 'chats',
     String? proxy,
     MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
   }) async {
     final json = await _runRaw(
       'discover-channels',
       {
         'token': token,
         'count': count,
+        'kind': kind,
         if (topics.isNotEmpty) 'topics': topics,
         if (excludeHashes.isNotEmpty) 'excludeHashes': excludeHashes,
         if (excludeChatIds.isNotEmpty) 'excludeChatIds': excludeChatIds,
       },
       onProgress: onProgress,
       proxy: proxy,
+      cancel: cancel,
     );
     if (json == null) {
       return ChannelDiscoverResult(ok: false, message: 'Пустой ответ CLI');
@@ -266,6 +276,7 @@ class MaxMotherService {
     List<Map<String, dynamic>> groups = const [],
     String? proxy,
     MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
   }) async {
     final json = await _runRaw(
       'fetch-profile-invite-links',
@@ -276,6 +287,7 @@ class MaxMotherService {
       },
       onProgress: onProgress,
       proxy: proxy,
+      cancel: cancel,
     );
     if (json == null) {
       return MotherGroupsResult(ok: false, message: 'Пустой ответ CLI');
@@ -289,6 +301,7 @@ class MaxMotherService {
     int delayMs = 2500,
     String? proxy,
     MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
   }) async {
     return _run(
       'join-groups',
@@ -299,6 +312,64 @@ class MaxMotherService {
       },
       onProgress: onProgress,
       proxy: proxy,
+      cancel: cancel,
+    );
+  }
+
+  static Future<MotherJoinResult> leaveGroups({
+    required String token,
+    required List<String> chatIds,
+    int delayMs = 2500,
+    String? proxy,
+    MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
+  }) async {
+    final ids = [...{...chatIds.map((id) => id.trim()).where((id) => id.isNotEmpty)}];
+    if (ids.isEmpty) {
+      return MotherJoinResult(ok: false, message: 'Не выбраны каналы для выхода');
+    }
+
+    final json = await _runRaw(
+      'leave-groups',
+      {
+        'token': token,
+        'chatIds': ids,
+        'delayMs': delayMs,
+      },
+      onProgress: onProgress,
+      proxy: proxy,
+      cancel: cancel,
+    );
+    if (json == null) {
+      return MotherJoinResult(
+        ok: false,
+        message: cancel?.isCancelled == true ? 'Остановлено пользователем' : 'Пустой ответ CLI',
+      );
+    }
+    if (json['cancelled'] == true || cancel?.isCancelled == true) {
+      return MotherJoinResult(ok: false, message: 'Остановлено пользователем');
+    }
+    if (json['error'] != null) {
+      return MotherJoinResult(ok: false, message: json['error'].toString());
+    }
+
+    final results = (json['results'] as List<dynamic>?)
+            ?.whereType<Map<String, dynamic>>()
+            .toList() ??
+        const [];
+    final left = json['left'] as int? ?? results.where((r) => r['ok'] == true).length;
+    final failed = json['failed'] as int? ?? results.where((r) => r['ok'] != true).length;
+    final total = json['total'] as int? ?? ids.length;
+    var msg = 'Вышло: $left/$total';
+    if (failed > 0) msg = '$msg, ошибок: $failed';
+
+    return MotherJoinResult(
+      ok: failed == 0,
+      message: msg,
+      joined: left,
+      failed: failed,
+      total: total,
+      results: results,
     );
   }
 
@@ -312,6 +383,7 @@ class MaxMotherService {
     int delayMs = 2500,
     String? proxy,
     MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
   }) async {
     return _run(
       'invite-children',
@@ -325,6 +397,7 @@ class MaxMotherService {
       },
       onProgress: onProgress,
       proxy: proxy,
+      cancel: cancel,
     );
   }
 
@@ -338,6 +411,7 @@ class MaxMotherService {
     int delayMs = 2500,
     String? proxy,
     MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
   }) async {
     return _run(
       'forward-links',
@@ -351,6 +425,7 @@ class MaxMotherService {
       },
       onProgress: onProgress,
       proxy: proxy,
+      cancel: cancel,
     );
   }
 
@@ -364,6 +439,7 @@ class MaxMotherService {
     int delayMs = 2500,
     String? proxy,
     MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
   }) async {
     return _run(
       'forward-and-join',
@@ -377,6 +453,7 @@ class MaxMotherService {
       },
       onProgress: onProgress,
       proxy: proxy,
+      cancel: cancel,
     );
   }
 
@@ -391,6 +468,7 @@ class MaxMotherService {
     String? proxy,
     List<String?> childProxies = const [],
     MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
   }) async {
     return _run(
       'children-join',
@@ -405,6 +483,7 @@ class MaxMotherService {
       },
       onProgress: onProgress,
       proxy: proxy,
+      cancel: cancel,
     );
   }
 
@@ -413,7 +492,13 @@ class MaxMotherService {
     Map<String, dynamic> args, {
     MotherProgressCallback? onProgress,
     String? proxy,
+    ActionCancelToken? cancel,
   }) async {
+    if (cancel?.isCancelled == true) {
+      onProgress?.call('⏹ Остановлено');
+      return {'ok': false, 'error': 'Остановлено пользователем', 'cancelled': true};
+    }
+
     final node = await NodeRuntime.findNodeExecutable();
     final cli = await NodeRuntime.findCliPath();
     if (node == null || cli == null) return null;
@@ -429,65 +514,105 @@ class MaxMotherService {
     }
 
     try {
+      onProgress?.call('CLI: $command…');
       return await _motherCliLock.run(() async {
-      final process = await Process.start(
-        node,
-        [cli, command, jsonEncode(payload)],
-        workingDirectory: authDir,
-        environment: {
-          ...Platform.environment,
-          'NODE_NO_WARNINGS': '1',
-        },
-      );
-
-      final stdoutBuffer = StringBuffer();
-      final stderrSub = process.stderr
-          .transform(utf8.decoder)
-          .transform(const LineSplitter())
-          .listen((line) {
-        final trimmed = line.trim();
-        if (!trimmed.startsWith('{')) return;
-        try {
-          final json = jsonDecode(trimmed) as Map<String, dynamic>;
-          if (json['type'] == 'progress' && json['message'] is String) {
-            final level = json['level'] as String? ?? 'info';
-            final message = json['message'] as String;
-            final data = json['data'];
-            var out = message;
-            if (level == 'debug') {
-              out = '🔍 $message';
-              if (data != null) out = '$out ${jsonEncode(data)}';
-            } else if (level == 'warn') {
-              out = '⚠ $message';
-            }
-            onProgress?.call(out);
-          }
-        } catch (_) {}
-      });
-
-      await for (final chunk in process.stdout.transform(utf8.decoder)) {
-        stdoutBuffer.write(chunk);
+      if (cancel?.isCancelled == true) {
+        onProgress?.call('⏹ Остановлено');
+        return {'ok': false, 'error': 'Остановлено пользователем', 'cancelled': true};
       }
 
-      await stderrSub.cancel();
-      final exitCode = await process.exitCode;
-      final stdout = stdoutBuffer.toString().trim();
+      final encoded = jsonEncode(payload);
+      // Prefer args file: Windows CreateProcess ~32k; 100+ invite links overflow argv.
+      final useArgsFile = true;
 
-      for (final line in stdout.split('\n').reversed) {
-        final trimmed = line.trim();
-        if (!trimmed.startsWith('{')) continue;
-        try {
-          return jsonDecode(trimmed) as Map<String, dynamic>;
-        } catch (_) {}
-      }
-      if (exitCode != 0) {
-        onProgress?.call('⚠ CLI завершился с кодом $exitCode');
+      File? argsFile;
+      late final List<String> processArgs;
+      if (useArgsFile) {
+        argsFile = File(
+          '${Directory.systemTemp.path}${Platform.pathSeparator}'
+          'max_cli_${command}_${DateTime.now().microsecondsSinceEpoch}.json',
+        );
+        await argsFile.writeAsString(encoded);
+        processArgs = [cli, command, '@${argsFile.path}'];
+        onProgress?.call('CLI: аргументы через файл (${encoded.length} байт)');
       } else {
-        onProgress?.call('⚠ CLI завершился без JSON-ответа');
+        processArgs = [cli, command, encoded];
       }
-      return null;
+
+      try {
+        final process = await Process.start(
+          node,
+          processArgs,
+          workingDirectory: authDir,
+          environment: {
+            ...Platform.environment,
+            'NODE_NO_WARNINGS': '1',
+          },
+        );
+        cancel?.attachProcess(process);
+
+        final stdoutBuffer = StringBuffer();
+        final stderrSub = process.stderr
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())
+            .listen((line) {
+          final trimmed = line.trim();
+          if (!trimmed.startsWith('{')) return;
+          try {
+            final json = jsonDecode(trimmed) as Map<String, dynamic>;
+            if (json['type'] == 'progress' && json['message'] is String) {
+              final level = json['level'] as String? ?? 'info';
+              final message = json['message'] as String;
+              final data = json['data'];
+              var out = message;
+              if (level == 'debug') {
+                out = '🔍 $message';
+                if (data != null) out = '$out ${jsonEncode(data)}';
+              } else if (level == 'warn') {
+                out = '⚠ $message';
+              }
+              onProgress?.call(out);
+            }
+          } catch (_) {}
+        });
+
+        await for (final chunk in process.stdout.transform(utf8.decoder)) {
+          stdoutBuffer.write(chunk);
+        }
+
+        await stderrSub.cancel();
+        final exitCode = await process.exitCode;
+        final stdout = stdoutBuffer.toString().trim();
+
+        if (cancel?.isCancelled == true) {
+          onProgress?.call('⏹ Остановлено');
+          return {'ok': false, 'error': 'Остановлено пользователем', 'cancelled': true};
+        }
+
+        for (final line in stdout.split('\n').reversed) {
+          final trimmed = line.trim();
+          if (!trimmed.startsWith('{')) continue;
+          try {
+            return jsonDecode(trimmed) as Map<String, dynamic>;
+          } catch (_) {}
+        }
+        if (exitCode != 0) {
+          onProgress?.call('⚠ CLI завершился с кодом $exitCode');
+        } else {
+          onProgress?.call('⚠ CLI завершился без JSON-ответа');
+        }
+        return null;
+      } finally {
+        if (argsFile != null) {
+          try {
+            await argsFile.delete();
+          } catch (_) {}
+        }
+      }
       });
-    } catch (_) {}
+    } catch (e) {
+      onProgress?.call('⚠ Не удалось запустить CLI: $e');
+    }
     return null;
   }
 
@@ -496,6 +621,7 @@ class MaxMotherService {
     Map<String, dynamic> args, {
     MotherProgressCallback? onProgress,
     String? proxy,
+    ActionCancelToken? cancel,
   }) async {
     final cli = await NodeRuntime.findCliPath();
     if (cli == null) {
@@ -522,8 +648,24 @@ class MaxMotherService {
     }
 
     try {
-      final json = await _runRaw(command, args, onProgress: onProgress, proxy: proxy);
+      final json = await _runRaw(
+        command,
+        args,
+        onProgress: onProgress,
+        proxy: proxy,
+        cancel: cancel,
+      );
       if (json != null) {
+        if (json['cancelled'] == true || cancel?.isCancelled == true) {
+          return MotherJoinResult(
+            ok: false,
+            message: 'Остановлено пользователем',
+            results: (json['results'] as List<dynamic>?)
+                    ?.whereType<Map<String, dynamic>>()
+                    .toList() ??
+                const [],
+          );
+        }
         final result = MotherJoinResult.fromJson(json);
         final invited = result.invited;
         final joined = result.joined;
@@ -564,6 +706,10 @@ class MaxMotherService {
         );
       }
 
+      if (cancel?.isCancelled == true) {
+        return MotherJoinResult(ok: false, message: 'Остановлено пользователем');
+      }
+
       return MotherJoinResult(
         ok: false,
         message: 'Пустой ответ CLI',
@@ -571,5 +717,227 @@ class MaxMotherService {
     } catch (e) {
       return MotherJoinResult(ok: false, message: e.toString());
     }
+  }
+
+  /// Create channel + optional description/posts for one account token.
+  static Future<FunnelSetupResult> funnelSetup({
+    required String token,
+    required String title,
+    String? description,
+    String? photoPath,
+    List<Map<String, dynamic>> posts = const [],
+    bool publish = true,
+    bool privateChannel = false,
+    bool commentsEnabled = true,
+    String? proxy,
+    MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
+  }) async {
+    final json = await _runRaw(
+      'funnel-setup',
+      {
+        'token': token,
+        'title': title,
+        if (description != null && description.trim().isNotEmpty)
+          'description': description.trim(),
+        if (photoPath != null && photoPath.trim().isNotEmpty) 'photoPath': photoPath.trim(),
+        'posts': posts,
+        'publish': publish,
+        'privateChannel': privateChannel,
+        'commentsEnabled': commentsEnabled,
+      },
+      onProgress: onProgress,
+      proxy: proxy,
+      cancel: cancel,
+    );
+    if (json == null) {
+      return FunnelSetupResult(
+        ok: false,
+        message: cancel?.isCancelled == true ? 'Остановлено пользователем' : 'CLI не ответил',
+      );
+    }
+    if (json['cancelled'] == true || cancel?.isCancelled == true) {
+      return FunnelSetupResult(ok: false, message: 'Остановлено пользователем');
+    }
+    if (json['ok'] != true) {
+      return FunnelSetupResult(
+        ok: false,
+        message: json['error']?.toString() ?? 'Не удалось создать канал',
+      );
+    }
+    return FunnelSetupResult.fromJson(json);
+  }
+
+  /// Publish posts into an existing channel (no create).
+  static Future<FunnelPublishResult> funnelPublish({
+    required String token,
+    required String chatId,
+    List<Map<String, dynamic>> posts = const [],
+    String? proxy,
+    MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
+  }) async {
+    final json = await _runRaw(
+      'funnel-publish',
+      {
+        'token': token,
+        'chatId': chatId,
+        'posts': posts,
+      },
+      onProgress: onProgress,
+      proxy: proxy,
+      cancel: cancel,
+    );
+    if (json == null) {
+      return FunnelPublishResult(
+        ok: false,
+        message: cancel?.isCancelled == true ? 'Остановлено пользователем' : 'CLI не ответил',
+      );
+    }
+    if (json['cancelled'] == true || cancel?.isCancelled == true) {
+      return FunnelPublishResult(ok: false, message: 'Остановлено пользователем');
+    }
+    if (json['ok'] != true) {
+      return FunnelPublishResult(
+        ok: false,
+        message: json['error']?.toString() ?? 'Не удалось опубликовать',
+      );
+    }
+    return FunnelPublishResult.fromJson(json);
+  }
+
+  /// Invite URL for an existing funnel/owned channel (discovers CHANNEL if [chatId] null).
+  static Future<ChannelInviteResolveResult> resolveChannelInvite({
+    required String token,
+    String? chatId,
+    String? proxy,
+    MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
+  }) async {
+    final json = await _runRaw(
+      'resolve-channel-invite',
+      {
+        'token': token,
+        if (chatId != null && chatId.trim().isNotEmpty) 'chatId': chatId.trim(),
+      },
+      onProgress: onProgress,
+      proxy: proxy,
+      cancel: cancel,
+    );
+    if (json == null) {
+      return ChannelInviteResolveResult(
+        ok: false,
+        message: cancel?.isCancelled == true ? 'Остановлено пользователем' : 'CLI не ответил',
+      );
+    }
+    if (json['cancelled'] == true || cancel?.isCancelled == true) {
+      return ChannelInviteResolveResult(ok: false, message: 'Остановлено пользователем');
+    }
+    if (json['ok'] != true && json['error'] != null) {
+      return ChannelInviteResolveResult(
+        ok: false,
+        message: json['error'].toString(),
+      );
+    }
+    final inviteUrl = (json['inviteUrl'] as String?)?.trim();
+    if (inviteUrl == null || inviteUrl.isEmpty) {
+      return ChannelInviteResolveResult(
+        ok: false,
+        message: json['error']?.toString() ?? 'Нет invite-ссылки',
+      );
+    }
+    return ChannelInviteResolveResult(
+      ok: true,
+      message: 'OK',
+      chatId: json['chatId']?.toString(),
+      title: json['title']?.toString(),
+      inviteHash: json['inviteHash']?.toString(),
+      inviteUrl: inviteUrl,
+    );
+  }
+}
+
+class ChannelInviteResolveResult {
+  ChannelInviteResolveResult({
+    required this.ok,
+    required this.message,
+    this.chatId,
+    this.title,
+    this.inviteHash,
+    this.inviteUrl,
+  });
+
+  final bool ok;
+  final String message;
+  final String? chatId;
+  final String? title;
+  final String? inviteHash;
+  final String? inviteUrl;
+}
+
+class FunnelSetupResult {
+  FunnelSetupResult({
+    required this.ok,
+    required this.message,
+    this.chatId,
+    this.title,
+    this.postsSent = 0,
+    this.inviteHash,
+    this.inviteUrl,
+    this.descriptionApplied = false,
+    this.avatarApplied = false,
+  });
+
+  final bool ok;
+  final String message;
+  final String? chatId;
+  final String? title;
+  final int postsSent;
+  final String? inviteHash;
+  final String? inviteUrl;
+  final bool descriptionApplied;
+  final bool avatarApplied;
+
+  factory FunnelSetupResult.fromJson(Map<String, dynamic> json) {
+    return FunnelSetupResult(
+      ok: json['ok'] == true,
+      message: json['error']?.toString() ?? 'Готово',
+      chatId: json['chatId']?.toString(),
+      title: json['title']?.toString(),
+      postsSent: json['postsSent'] as int? ?? 0,
+      inviteHash: json['inviteHash']?.toString(),
+      inviteUrl: json['inviteUrl']?.toString(),
+      descriptionApplied: json['descriptionApplied'] == true,
+      avatarApplied: json['avatarApplied'] == true,
+    );
+  }
+}
+
+class FunnelPublishResult {
+  FunnelPublishResult({
+    required this.ok,
+    required this.message,
+    this.chatId,
+    this.postsSent = 0,
+    this.photoFailures = 0,
+    this.inviteUrl,
+  });
+
+  final bool ok;
+  final String message;
+  final String? chatId;
+  final int postsSent;
+  final int photoFailures;
+  final String? inviteUrl;
+
+  factory FunnelPublishResult.fromJson(Map<String, dynamic> json) {
+    return FunnelPublishResult(
+      ok: json['ok'] == true,
+      message: json['error']?.toString() ?? 'Готово',
+      chatId: json['chatId']?.toString(),
+      postsSent: json['postsSent'] as int? ?? 0,
+      photoFailures: json['photoFailures'] as int? ?? 0,
+      inviteUrl: json['inviteUrl']?.toString(),
+    );
   }
 }

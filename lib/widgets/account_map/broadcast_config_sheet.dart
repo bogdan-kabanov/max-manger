@@ -301,7 +301,9 @@ class _BroadcastConfigSheetState extends State<_BroadcastConfigSheet> {
                           minLines: 2,
                           maxLines: 6,
                           decoration: const InputDecoration(
-                            hintText: 'Текст сообщения бота…',
+                            hintText:
+                                'Текст… Ссылка: [Вступить](https://max.ru/join/…)',
+                            helperText: 'Скрытая ссылка: [текст](https://…)',
                             border: OutlineInputBorder(),
                           ),
                         ),

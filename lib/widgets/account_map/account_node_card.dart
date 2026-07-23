@@ -16,7 +16,7 @@ class AccountNodeCard extends StatelessWidget {
   });
 
   static const nodeWidth = 168.0;
-  static const nodeHeight = 118.0;
+  static const nodeHeight = 132.0;
 
   final MaxAccount account;
   final bool selected;
@@ -61,7 +61,7 @@ class AccountNodeCard extends StatelessWidget {
                   Expanded(
                     child: Text(
                       account.label,
-                      maxLines: 2,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
                     ),
@@ -71,6 +71,15 @@ class AccountNodeCard extends StatelessWidget {
                     const Icon(Icons.subdirectory_arrow_right, size: 16, color: Colors.lightBlueAccent),
                 ],
               ),
+              if (account.phone?.trim().isNotEmpty == true) ...[
+                const SizedBox(height: 2),
+                Text(
+                  account.phone!.trim(),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 11, color: theme.colorScheme.onSurfaceVariant),
+                ),
+              ],
               const Spacer(),
               Wrap(
                 spacing: 4,

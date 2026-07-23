@@ -405,7 +405,7 @@ class _NoMothersFallbackState extends State<_NoMothersFallback> {
         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Text(
-            'Сначала настройте матки (вкладка «Матка» справа)\n'
+            'Сначала настройте матки (вкладка «Матка»)\n'
             'или выберите аккаунт в «Профили».',
             textAlign: TextAlign.center,
             style: theme.textTheme.bodyMedium,
@@ -436,7 +436,7 @@ class _NoMothersFallbackState extends State<_NoMothersFallback> {
         ),
         const SizedBox(height: 8),
         Text(
-          'Создайте кластер матки справа — тогда чаты разделятся по маткам.',
+          'Создайте кластер матки во вкладке «Матка» — тогда чаты разделятся по маткам.',
           style: theme.textTheme.bodySmall?.copyWith(color: Colors.white54),
         ),
         const SizedBox(height: 12),

@@ -4,6 +4,7 @@ import 'package:uuid/uuid.dart';
 
 import 'map_workflow.dart';
 
+
 enum AccountMapEdgeType { motherChild, forwardLink, message }
 
 enum AccountMapActivityType { forwardLink, childJoin, invite, error, info }
@@ -100,6 +101,9 @@ class MotherCluster {
     required this.name,
     this.motherAccountId,
     this.childAccountIds = const {},
+    this.postJoinWriteEnabled = false,
+    this.postJoinMessages = const [],
+    this.postJoinDelayMs = 5000,
   });
 
   final String id;
@@ -107,19 +111,34 @@ class MotherCluster {
   final String? motherAccountId;
   final Set<String> childAccountIds;
 
+  /// After children join a chat, send [postJoinMessages] via API (not web clicker).
+  final bool postJoinWriteEnabled;
+  final List<BroadcastMessageStep> postJoinMessages;
+  /// Pause after join before the first message.
+  final int postJoinDelayMs;
+
   int get childCount => childAccountIds.length;
+
+  bool get hasPostJoinMessages =>
+      postJoinWriteEnabled && postJoinMessages.any((m) => m.text.trim().isNotEmpty);
 
   MotherCluster copyWith({
     String? name,
     String? motherAccountId,
     Set<String>? childAccountIds,
     bool clearMother = false,
+    bool? postJoinWriteEnabled,
+    List<BroadcastMessageStep>? postJoinMessages,
+    int? postJoinDelayMs,
   }) {
     return MotherCluster(
       id: id,
       name: name ?? this.name,
       motherAccountId: clearMother ? null : (motherAccountId ?? this.motherAccountId),
       childAccountIds: childAccountIds ?? this.childAccountIds,
+      postJoinWriteEnabled: postJoinWriteEnabled ?? this.postJoinWriteEnabled,
+      postJoinMessages: postJoinMessages ?? this.postJoinMessages,
+      postJoinDelayMs: postJoinDelayMs ?? this.postJoinDelayMs,
     );
   }
 
@@ -128,6 +147,9 @@ class MotherCluster {
         'name': name,
         if (motherAccountId != null) 'motherAccountId': motherAccountId,
         'childAccountIds': childAccountIds.toList(),
+        'postJoinWriteEnabled': postJoinWriteEnabled,
+        'postJoinMessages': postJoinMessages.map((m) => m.toJson()).toList(),
+        'postJoinDelayMs': postJoinDelayMs,
       };
 
   factory MotherCluster.fromJson(Map<String, dynamic> json) {
@@ -140,6 +162,12 @@ class MotherCluster {
       childAccountIds: (json['childAccountIds'] as List<dynamic>? ?? [])
           .map((e) => e.toString())
           .toSet(),
+      postJoinWriteEnabled: json['postJoinWriteEnabled'] == true,
+      postJoinMessages: (json['postJoinMessages'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(BroadcastMessageStep.fromJson)
+          .toList(),
+      postJoinDelayMs: (json['postJoinDelayMs'] as num?)?.toInt() ?? 5000,
     );
   }
 

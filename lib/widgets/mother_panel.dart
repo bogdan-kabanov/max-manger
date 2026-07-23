@@ -3,10 +3,15 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/account_map_state.dart';
+import '../models/account_group_membership.dart';
+import '../models/active_action.dart';
+import '../models/app_nav_page.dart';
 import '../models/max_account.dart';
 import '../models/mother_group_channel.dart';
+import '../models/rate_settings.dart';
 import '../providers/app_state.dart';
 import '../services/browser_session_manager.dart';
+import '../services/child_post_join_runner.dart';
 import '../services/max_mother_service.dart';
 import '../services/mother_invite_planner.dart';
 import '../services/storage_service.dart';
@@ -39,11 +44,14 @@ class _MotherPanelState extends State<MotherPanel> {
   String? _groupsLoadedForMotherId;
   MotherInvitePlan? _massPlan;
   bool _massLoading = false;
+  bool _rateHydrated = false;
+  bool _verifyingMembership = false;
+  MembershipVerifySummary? _lastVerify;
 
   @override
   void initState() {
     super.initState();
-    _delayController = TextEditingController(text: '2500');
+    _delayController = TextEditingController(text: '2.5');
     MaxMotherService.isAvailable().then((v) {
       if (mounted) setState(() => _cliReady = v);
     });
@@ -54,6 +62,39 @@ class _MotherPanelState extends State<MotherPanel> {
     _linksController.dispose();
     _delayController.dispose();
     super.dispose();
+  }
+
+  void _hydrateRateSettings(RateSettings settings) {
+    if (_rateHydrated) return;
+    _rateHydrated = true;
+    _delayController.text = _msToSecText(settings.motherJoinDelayMs);
+  }
+
+  static String _msToSecText(int ms) {
+    final sec = ms / 1000;
+    if (sec == sec.roundToDouble()) return sec.round().toString();
+    return sec.toStringAsFixed(1);
+  }
+
+  int _delayMsFromField(TextEditingController controller, int fallbackMs) {
+    final raw = controller.text.trim().replaceAll(',', '.');
+    final sec = double.tryParse(raw);
+    if (sec == null) return fallbackMs;
+    return (sec * 1000).round().clamp(200, 120000);
+  }
+
+  int _currentMotherDelayMs(AppState state) {
+    return _delayMsFromField(_delayController, state.rateSettings.motherJoinDelayMs);
+  }
+
+  Future<void> _persistRateSettings(AppState state) async {
+    final next = state.rateSettings.copyWith(
+      motherJoinDelayMs: _delayMsFromField(
+        _delayController,
+        state.rateSettings.motherJoinDelayMs,
+      ),
+    );
+    await state.updateRateSettings(next);
   }
 
   void _log(String msg, {String level = 'info'}) {
@@ -68,6 +109,136 @@ class _MotherPanelState extends State<MotherPanel> {
       ..clear()
       ..addAll(cluster?.childAccountIds ?? const {});
     _groupsLoadedForMotherId = null;
+  }
+
+  Future<void> _runPostJoinWrites({
+    required List<MaxAccount> tokenChildren,
+    required List<Map<String, dynamic>> joinResults,
+    ActionCancelToken? cancel,
+  }) async {
+    final state = context.read<AppState>();
+    final childrenOnly = tokenChildren
+        .where((c) => state.canSendJoinMessages(c.id))
+        .toList();
+    final hasAny = childrenOnly.any((c) {
+      final t = state.joinTemplateForAccount(c.id);
+      return t != null && t.isActive;
+    });
+    if (!hasAny) return;
+    if (cancel?.isCancelled == true) return;
+
+    final action = state.beginAction(
+      kind: ActiveActionKind.postJoinMessage,
+      title: 'Письма после вступления',
+      subtitle: '${childrenOnly.length} акк.',
+    );
+    try {
+      final channelLinks = await state.ensureChannelInviteLinks(
+        childrenOnly,
+        onLog: (msg, {String level = 'info'}) => _log(msg, level: level),
+        cancel: action.cancelToken,
+      );
+      await ChildPostJoinRunner.runFromJoinResults(
+        tokenChildren: childrenOnly,
+        joinResults: joinResults,
+        templateFor: (child) => state.joinTemplateForAccount(child.id),
+        channelLinkFor: (child) =>
+            channelLinks[child.id] ??
+            state.channelPolicyFor(child.id).lastCreatedInviteUrl,
+        rateSettings: state.rateSettings,
+        onLog: _log,
+        cancel: action.cancelToken,
+        onProgress: (message, {int? done, int? total}) {
+          state.updateActionProgress(action.id, message: message, done: done, total: total);
+        },
+      );
+      state.finishAction(
+        action.id,
+        status: action.cancelToken.isCancelled
+            ? ActiveActionStatus.cancelled
+            : ActiveActionStatus.completed,
+      );
+    } catch (e) {
+      state.finishAction(
+        action.id,
+        status: ActiveActionStatus.failed,
+        message: e.toString(),
+      );
+    }
+  }
+
+  Future<void> _writeNowToSelectedChats() async {
+    final state = context.read<AppState>();
+    final children = state.accounts
+        .where(
+          (a) =>
+              _childIds.contains(a.id) &&
+              a.hasApiSession &&
+              state.canSendJoinMessages(a.id),
+        )
+        .toList();
+    if (children.isEmpty) {
+      _failPrepare('Отметьте дочерних с токеном');
+      return;
+    }
+    final withTemplate = children.where((c) {
+      final t = state.joinTemplateForAccount(c.id);
+      return t != null && t.isActive;
+    }).toList();
+    if (withTemplate.isEmpty) {
+      _failPrepare('Назначьте шаблон дочерним во вкладке «Шаблоны»');
+      return;
+    }
+    final chatIds = _motherGroups
+        .where((g) => _selectedGroupIds.contains(g.chatId))
+        .map((g) => g.chatId)
+        .toList();
+    if (chatIds.isEmpty) {
+      _failPrepare('Выберите каналы матки, куда писать');
+      return;
+    }
+    setState(() => _running = true);
+    final action = state.beginAction(
+      kind: ActiveActionKind.postJoinMessage,
+      title: 'Письма в выбранные каналы',
+      subtitle: '${withTemplate.length} акк. · ${chatIds.length} чатов',
+    );
+    try {
+      final channelLinks = await state.ensureChannelInviteLinks(
+        withTemplate,
+        onLog: (msg, {String level = 'info'}) => _log(msg, level: level),
+        cancel: action.cancelToken,
+      );
+      await ChildPostJoinRunner.runToChatIds(
+        children: withTemplate,
+        chatIds: chatIds,
+        templateFor: (child) => state.joinTemplateForAccount(child.id),
+        channelLinkFor: (child) =>
+            channelLinks[child.id] ??
+            state.channelPolicyFor(child.id).lastCreatedInviteUrl,
+        delayBeforeMs: 0,
+        rateSettings: state.rateSettings,
+        onLog: _log,
+        cancel: action.cancelToken,
+        onProgress: (message, {int? done, int? total}) {
+          state.updateActionProgress(action.id, message: message, done: done, total: total);
+        },
+      );
+      state.finishAction(
+        action.id,
+        status: action.cancelToken.isCancelled
+            ? ActiveActionStatus.cancelled
+            : ActiveActionStatus.completed,
+      );
+    } catch (e) {
+      state.finishAction(
+        action.id,
+        status: ActiveActionStatus.failed,
+        message: e.toString(),
+      );
+    } finally {
+      if (mounted) setState(() => _running = false);
+    }
   }
 
   void _ensureActiveCluster(AppState state) {
@@ -195,13 +366,13 @@ class _MotherPanelState extends State<MotherPanel> {
     );
   }
 
-  Future<void> _ensureUzbekViewerIds(AppState state, {int limit = 40}) async {
+  Future<void> _ensureChildViewerIds(AppState state, {int limit = 40}) async {
     final motherIds = state.accountMap.allMotherAccountIds;
-    final uzb = state.accounts
-        .where((a) => !motherIds.contains(a.id) && a.isUzbek && a.hasApiSession && a.viewerId == null)
+    final children = state.accounts
+        .where((a) => !motherIds.contains(a.id) && a.hasApiSession && a.viewerId == null)
         .take(limit)
         .toList();
-    for (final account in uzb) {
+    for (final account in children) {
       await state.ensureViewerId(account);
       _log('viewer id «${account.label}»…');
     }
@@ -250,7 +421,7 @@ class _MotherPanelState extends State<MotherPanel> {
     _log('Загружаем каналы ${mothers.length} маток…');
     try {
       await _loadMotherGroupsCore(state, mothers);
-      await _ensureUzbekViewerIds(state);
+      await _ensureChildViewerIds(state);
       if (!mounted) return;
       setState(() {
         _groupsLoadedForMotherId = null;
@@ -280,11 +451,17 @@ class _MotherPanelState extends State<MotherPanel> {
   Future<void> _runMassProportionalInvite() async {
     final state = context.read<AppState>();
     if (_running || _massLoading) return;
+    await _persistRateSettings(state);
 
     setState(() {
       _running = true;
       _massLoading = true;
     });
+    final action = state.beginAction(
+      kind: ActiveActionKind.massInvite,
+      title: 'Массовый набор',
+      subtitle: 'Пропорциональные приглашения',
+    );
     try {
       final mothersNeedingGroups = <MaxAccount>[];
       for (final cluster in state.motherClusters) {
@@ -300,7 +477,7 @@ class _MotherPanelState extends State<MotherPanel> {
         _log('Сначала подгружаем каналы ${mothersNeedingGroups.length} маток…');
         await _loadMotherGroupsCore(state, mothersNeedingGroups);
       }
-      await _ensureUzbekViewerIds(state);
+      await _ensureChildViewerIds(state);
       if (!mounted) return;
 
       final plan = _computeMassPlan(state);
@@ -310,13 +487,18 @@ class _MotherPanelState extends State<MotherPanel> {
       });
       if (!plan.ok) {
         _failPrepare(plan.error ?? 'Нечего запускать');
+        state.finishAction(
+          action.id,
+          status: ActiveActionStatus.failed,
+          message: plan.error ?? 'Нечего запускать',
+        );
         return;
       }
 
       _log(plan.summaryLine);
       for (final s in plan.motherSummaries) {
         _log(
-          '«${s.clusterName}» / ${s.mother.label}: ${s.accountCount} узб → '
+          '«${s.clusterName}» / ${s.mother.label}: ${s.accountCount} акк → '
           '${s.groupCount} групп (${s.inviteCount} приглаш.)',
         );
       }
@@ -327,14 +509,23 @@ class _MotherPanelState extends State<MotherPanel> {
         if (active != null) setState(() => _applyCluster(active));
       }
 
-      final delayMs = int.tryParse(_delayController.text.trim()) ?? 2500;
+      final delayMs = _currentMotherDelayMs(state);
       final byMother = <String, List<MotherInviteSlot>>{};
       for (final slot in plan.slots) {
         byMother.putIfAbsent(slot.mother.id, () => []).add(slot);
       }
 
+      state.updateActionProgress(
+        action.id,
+        message: plan.summaryLine,
+        done: 0,
+        total: plan.slots.length,
+      );
+
       var motherIndex = 0;
+      var slotDone = 0;
       for (final entry in byMother.entries) {
+        if (action.cancelToken.isCancelled) break;
         motherIndex++;
         final slots = entry.value;
         final mother = slots.first.mother;
@@ -346,6 +537,7 @@ class _MotherPanelState extends State<MotherPanel> {
 
         _log('[$motherIndex/${byMother.length}] матка «${fresh.label}»: ${slots.length} групп');
         for (var i = 0; i < slots.length; i++) {
+          if (action.cancelToken.isCancelled) break;
           final slot = slots[i];
           final inviteIds = <int>[];
           for (final child in slot.children) {
@@ -354,11 +546,12 @@ class _MotherPanelState extends State<MotherPanel> {
           }
           if (inviteIds.isEmpty) {
             _log('  · «${slot.group.title}»: нет viewer id', level: 'warn');
+            slotDone += 1;
             continue;
           }
 
           _log(
-            '  · [${i + 1}/${slots.length}] «${slot.group.title}» ← ${inviteIds.length} узб',
+            '  · [${i + 1}/${slots.length}] «${slot.group.title}» ← ${inviteIds.length} акк',
           );
           final result = await MaxMotherService.inviteChildren(
             motherToken: fresh.apiToken!,
@@ -375,6 +568,14 @@ class _MotherPanelState extends State<MotherPanel> {
             delayMs: delayMs,
             proxy: fresh.isolation.proxyServer,
             onProgress: _log,
+            cancel: action.cancelToken,
+          );
+          slotDone += 1;
+          state.updateActionProgress(
+            action.id,
+            message: '«${fresh.label}» · ${slot.group.title}',
+            done: slotDone,
+            total: plan.slots.length,
           );
           if (result.ok) {
             _log('    ✓ приглашено: ${result.invited}');
@@ -384,21 +585,31 @@ class _MotherPanelState extends State<MotherPanel> {
         }
       }
 
-      _log(
-        'Готово: ${plan.uzbekAssigned} узб / ${plan.mothersReady} маток / '
-        '${plan.totalInvites} приглашений',
-      );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Набор: ${plan.uzbekAssigned} узб → ${plan.mothersReady} маток '
-              '(${plan.totalInvites} приглаш.)',
-            ),
-          ),
+      if (action.cancelToken.isCancelled) {
+        _log('Массовый набор остановлен', level: 'warn');
+      } else {
+        _log(
+          'Готово: ${plan.childAssigned} акк / ${plan.mothersReady} маток / '
+          '${plan.totalInvites} приглашений',
         );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Набор: ${plan.childAssigned} акк → ${plan.mothersReady} маток '
+                '(${plan.totalInvites} приглаш.)',
+              ),
+            ),
+          );
+        }
       }
     } finally {
+      state.finishAction(
+        action.id,
+        status: action.cancelToken.isCancelled
+            ? ActiveActionStatus.cancelled
+            : ActiveActionStatus.completed,
+      );
       if (mounted) {
         setState(() {
           _running = false;
@@ -468,6 +679,104 @@ class _MotherPanelState extends State<MotherPanel> {
     setState(() => _motherGroups = StorageService.instance.motherGroupsFor(motherId));
   }
 
+  Future<void> _leaveSelectedGroups() async {
+    final state = context.read<AppState>();
+    await _persistRateSettings(state);
+    final mother = _mother(state);
+    if (mother == null || !mother.hasApiSession) {
+      _failPrepare('У матки нет API-токена');
+      return;
+    }
+
+    final selected = _motherGroups.where((g) => _selectedGroupIds.contains(g.chatId)).toList();
+    if (selected.isEmpty) {
+      _failPrepare('Отметьте каналы, из которых выйти');
+      return;
+    }
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Выйти из групп?'),
+        content: Text(
+          'Матка «${mother.label}» выйдет из ${selected.length} '
+          '${selected.length == 1 ? 'группы' : 'групп'}.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Выйти')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final delay = _currentMotherDelayMs(state);
+    final proxy = mother.isolation.proxyServer;
+    final chatIds = selected.map((g) => g.chatId).toList();
+
+    if (state.browser.activeAccount?.id == mother.id) {
+      _log('⚠ Матка открыта в MAX — закрываем браузер, иначе API-сессия оборвётся');
+      await state.browser.releaseWebview();
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+    }
+
+    setState(() => _running = true);
+    _log('─── Выход матки из ${chatIds.length} групп ───');
+    final action = state.beginAction(
+      kind: ActiveActionKind.leaveGroups,
+      title: 'Выход из каналов',
+      subtitle: '«${mother.label}» · ${chatIds.length}',
+    );
+    try {
+      await state.ensureViewerId(mother);
+      final m = state.accountById(mother.id)!;
+      final result = await MaxMotherService.leaveGroups(
+        token: m.apiToken!,
+        chatIds: chatIds,
+        delayMs: delay,
+        proxy: proxy,
+        onProgress: (msg) {
+          _log(msg);
+          state.updateActionProgress(action.id, message: msg);
+        },
+        cancel: action.cancelToken,
+      );
+
+      final leftIds = result.results
+          .where((r) => r['ok'] == true && r['chatId'] != null)
+          .map((r) => r['chatId'].toString())
+          .toSet();
+      if (leftIds.isNotEmpty) {
+        await StorageService.instance.removeMotherGroups(mother.id, leftIds);
+        await state.removeGroupMemberships(accountId: mother.id, chatIds: leftIds);
+        if (mounted && _motherId == mother.id) {
+          setState(() {
+            _motherGroups = StorageService.instance.motherGroupsFor(mother.id);
+            _selectedGroupIds.removeWhere(leftIds.contains);
+          });
+        }
+      }
+      if (mounted) {
+        _log(result.ok ? '✓ ${result.message}' : '✗ ${result.message}');
+      }
+      state.finishAction(
+        action.id,
+        status: action.cancelToken.isCancelled
+            ? ActiveActionStatus.cancelled
+            : (result.ok ? ActiveActionStatus.completed : ActiveActionStatus.failed),
+        message: result.message,
+      );
+    } catch (e) {
+      state.finishAction(
+        action.id,
+        status: ActiveActionStatus.failed,
+        message: e.toString(),
+      );
+    } finally {
+      if (mounted) setState(() => _running = false);
+    }
+  }
+
   Future<void> _refreshMotherGroups({bool scanMessages = true}) async {
     final state = context.read<AppState>();
     final mother = _mother(state);
@@ -490,6 +799,10 @@ class _MotherPanelState extends State<MotherPanel> {
       if (!mounted) return;
       if (result.ok) {
         await _persistGroups(mother.id, result.groups);
+        await state.syncMembershipsFromListedGroups(
+          accountId: mother.id,
+          listed: result.groups,
+        );
         setState(() {
           _selectedGroupIds
             ..clear()
@@ -691,7 +1004,7 @@ class _MotherPanelState extends State<MotherPanel> {
             mode == _MotherMode.childrenJoinOnly) &&
         selectedGroups.isEmpty &&
         !hasManualLink) {
-      _failPrepare('Снимите каналы и вставьте ссылку — или выберите каналы матки');
+      _failPrepare('Вставьте доп. ссылку max.ru/join/… — или выберите каналы матки');
       return null;
     }
 
@@ -721,9 +1034,10 @@ class _MotherPanelState extends State<MotherPanel> {
         .whereType<String>()
         .where((h) => h.isNotEmpty)
         .toSet();
-    final urls = selectedGroups.isEmpty && hasManualLink
-        ? manualUrls
-        : JoinLinkParser.toUrls(childHashes);
+    // Extra pasted links are additive — join another channel without clearing mother channels.
+    final urls = [
+      ...{...manualHashes, ...childHashes}.map((h) => 'https://max.ru/join/$h'),
+    ];
 
     if (mode == _MotherMode.inviteOnly && selectedGroups.isEmpty && !hasManualLink) {
       _failPrepare('Выберите каналы матки');
@@ -785,9 +1099,81 @@ class _MotherPanelState extends State<MotherPanel> {
     );
   }
 
-  Future<void> _afterRun(MotherJoinResult result, String motherId) async {
+  Future<void> _afterRun(
+    MotherJoinResult result,
+    String motherId, {
+    List<MaxAccount> children = const [],
+  }) async {
     if (result.groups.isNotEmpty) {
       await _persistGroups(motherId, result.groups);
+    }
+    final titleByChatId = <String, String>{
+      for (final g in _motherGroups) g.chatId: g.title,
+      for (final g in result.groups) g.chatId: g.title,
+    };
+    final state = context.read<AppState>();
+    await state.recordMembershipsFromJoinResults(
+      motherAccountId: motherId,
+      children: children,
+      results: result.results,
+      titleByChatId: titleByChatId,
+    );
+  }
+
+  Future<void> _verifyMemberships() async {
+    final state = context.read<AppState>();
+    final mother = _mother(state);
+    if (mother == null) return;
+
+    final expected = _motherGroups
+        .where((g) => _selectedGroupIds.contains(g.chatId))
+        .toList();
+    if (expected.isEmpty) {
+      _failPrepare('Выберите группы для проверки');
+      return;
+    }
+
+    final accountIds = <String>{
+      mother.id,
+      ..._childIds,
+    };
+    final withToken = state.accounts
+        .where((a) => accountIds.contains(a.id) && a.hasApiSession)
+        .map((a) => a.id)
+        .toList();
+    if (withToken.isEmpty) {
+      _failPrepare('Нет аккаунтов с токеном для проверки');
+      return;
+    }
+
+    setState(() {
+      _verifyingMembership = true;
+      _running = true;
+    });
+    _log('─── Проверка вступлений: ${expected.length} групп · ${withToken.length} акк. ───');
+    try {
+      final summary = await state.verifyAccountsInGroups(
+        accountIds: withToken,
+        expectedGroups: expected,
+        onLog: _log,
+      );
+      if (!mounted) return;
+      setState(() => _lastVerify = summary);
+      if (summary.allOk) {
+        _log('✓ Все проверенные аккаунты на месте в выбранных группах');
+      } else {
+        _log(
+          '⚠ Пропусков: ${summary.missingTotal} (акк. с ошибками/без группы)',
+          level: 'warn',
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _verifyingMembership = false;
+          _running = false;
+        });
+      }
     }
   }
 
@@ -814,12 +1200,13 @@ class _MotherPanelState extends State<MotherPanel> {
 
   Future<void> _runMode(_MotherMode mode) async {
     final state = context.read<AppState>();
+    await _persistRateSettings(state);
     _log('Подготовка…');
     final prepared = await _prepareRun(mode);
     if (prepared == null) return;
 
     final mother = _mother(state)!;
-    final delay = int.tryParse(_delayController.text) ?? 2500;
+    final delay = _currentMotherDelayMs(state);
 
     if (state.browser.activeAccount?.id == mother.id) {
       _log('⚠ Матка открыта в MAX — закрываем браузер, иначе API-сессия оборвётся');
@@ -829,6 +1216,14 @@ class _MotherPanelState extends State<MotherPanel> {
 
     setState(() => _running = true);
 
+    final modeKind = switch (mode) {
+      _MotherMode.full => ActiveActionKind.motherDeploy,
+      _MotherMode.motherJoin => ActiveActionKind.joinChannels,
+      _MotherMode.inviteOnly => ActiveActionKind.inviteChildren,
+      _MotherMode.forwardOnly => ActiveActionKind.forwardLinks,
+      _MotherMode.forwardAndJoin => ActiveActionKind.forwardAndJoin,
+      _MotherMode.childrenJoinOnly => ActiveActionKind.childrenJoin,
+    };
     final modeLabel = switch (mode) {
       _MotherMode.full => 'полный цикл',
       _MotherMode.motherJoin => 'только вступление матки',
@@ -837,6 +1232,16 @@ class _MotherPanelState extends State<MotherPanel> {
       _MotherMode.forwardAndJoin => 'переслать и вступить',
       _MotherMode.childrenJoinOnly => 'дочерние по ссылкам',
     };
+    final action = state.beginAction(
+      kind: modeKind,
+      title: modeKind.label,
+      subtitle: '«${mother.label}» · $modeLabel',
+    );
+    void trackProgress(String msg) {
+      _log(msg);
+      state.updateActionProgress(action.id, message: msg);
+    }
+
     _log('─── Старт: $modeLabel ───');
     _log('Матка: «${mother.label}» viewerId=${mother.viewerId ?? "?"} token=${mother.hasApiSession}');
     _log('Каналы (${prepared.inviteChatIds.length}): ${prepared.inviteChatIds.join(", ")}');
@@ -872,9 +1277,10 @@ class _MotherPanelState extends State<MotherPanel> {
           links: prepared.manualUrls,
           delayMs: delay,
           proxy: proxy,
-          onProgress: _log,
+          onProgress: trackProgress,
+          cancel: action.cancelToken,
         );
-        await _afterRun(result, mother.id);
+        await _afterRun(result, mother.id, children: prepared.children);
       } else if (mode == _MotherMode.inviteOnly) {
         await state.ensureViewerId(mother);
         final m = state.accountById(mother.id)!;
@@ -885,6 +1291,11 @@ class _MotherPanelState extends State<MotherPanel> {
         }
         if (inviteIds.isEmpty) {
           _failPrepare('Нет viewerId у дочерних — используйте «Переслать и вступить»');
+          state.finishAction(
+            action.id,
+            status: ActiveActionStatus.failed,
+            message: 'Нет viewerId у дочерних',
+          );
           return;
         }
         result = await MaxMotherService.inviteChildren(
@@ -895,9 +1306,10 @@ class _MotherPanelState extends State<MotherPanel> {
           inviteUserIds: inviteIds,
           delayMs: delay,
           proxy: proxy,
-          onProgress: _log,
+          onProgress: trackProgress,
+          cancel: action.cancelToken,
         );
-        await _afterRun(result, mother.id);
+        await _afterRun(result, mother.id, children: prepared.children);
       } else if (mode == _MotherMode.forwardOnly) {
         await state.ensureViewerId(mother);
         final mForward = state.accountById(mother.id)!;
@@ -908,27 +1320,35 @@ class _MotherPanelState extends State<MotherPanel> {
         }
         if (forwardIds.isEmpty) {
           _failPrepare('Нет viewerId у дочерних — откройте их в MAX');
+          state.finishAction(
+            action.id,
+            status: ActiveActionStatus.failed,
+            message: 'Нет viewerId у дочерних',
+          );
           return;
         }
         result = await MaxMotherService.forwardLinks(
           motherToken: mForward.apiToken!,
-          links: prepared.inviteChatIds.isEmpty ? prepared.manualUrls : const [],
+          links: prepared.manualUrls,
           groups: prepared.groups,
           chatIds: prepared.inviteChatIds,
           forwardUserIds: forwardIds,
           delayMs: delay,
           proxy: proxy,
-          onProgress: _log,
+          onProgress: trackProgress,
+          cancel: action.cancelToken,
         );
-        await _afterRun(result, mother.id);
+        await _afterRun(result, mother.id, children: prepared.children);
       } else if (mode == _MotherMode.forwardAndJoin) {
         await state.ensureViewerId(mother);
         final mFj = state.accountById(mother.id)!;
         final targets = <Map<String, dynamic>>[];
+        final tokenChildren = <MaxAccount>[];
         for (final child in prepared.children) {
           final id = await state.ensureViewerId(child);
           final fresh = state.accountById(child.id)!;
           if (id != null && fresh.hasApiSession) {
+            tokenChildren.add(fresh);
             final childProxy = fresh.isolation.proxyServer?.trim();
             targets.add({
               'userId': id,
@@ -942,26 +1362,34 @@ class _MotherPanelState extends State<MotherPanel> {
         }
         if (targets.isEmpty) {
           _failPrepare('Нужны токен и viewerId у дочерних аккаунтов');
+          state.finishAction(
+            action.id,
+            status: ActiveActionStatus.failed,
+            message: 'Нет токена/viewerId у дочерних',
+          );
           return;
         }
         result = await MaxMotherService.forwardAndJoin(
           motherToken: mFj.apiToken!,
-          links: prepared.inviteChatIds.isEmpty ? prepared.manualUrls : const [],
+          links: prepared.manualUrls,
           groups: prepared.groups,
           chatIds: prepared.inviteChatIds,
           childTargets: targets,
           delayMs: delay,
           proxy: proxy,
-          onProgress: _log,
+          onProgress: trackProgress,
+          cancel: action.cancelToken,
         );
-        await _afterRun(result, mother.id);
+        await _afterRun(result, mother.id, children: tokenChildren);
       } else if (mode == _MotherMode.childrenJoinOnly) {
         final tokens = <String>[];
         final childProxies = <String?>[];
+        final tokenChildren = <MaxAccount>[];
         for (final child in prepared.children) {
           await state.ensureViewerId(child);
           final fresh = state.accountById(child.id)!;
           if (fresh.hasApiSession) {
+            tokenChildren.add(fresh);
             tokens.add(fresh.apiToken!);
             final p = fresh.isolation.proxyServer?.trim();
             childProxies.add((p != null && p.isNotEmpty) ? p : proxy);
@@ -969,20 +1397,26 @@ class _MotherPanelState extends State<MotherPanel> {
         }
         if (tokens.isEmpty) {
           _failPrepare('Нет токенов у дочерних аккаунтов');
+          state.finishAction(
+            action.id,
+            status: ActiveActionStatus.failed,
+            message: 'Нет токенов у дочерних',
+          );
           return;
         }
         result = await MaxMotherService.childrenJoin(
           childTokens: tokens,
-          links: prepared.inviteChatIds.isEmpty ? prepared.manualUrls : const [],
+          links: prepared.manualUrls,
           groups: prepared.groups,
           chatIds: prepared.inviteChatIds,
           motherToken: state.accountById(mother.id)?.apiToken,
           delayMs: delay,
           proxy: proxy,
           childProxies: childProxies,
-          onProgress: _log,
+          onProgress: trackProgress,
+          cancel: action.cancelToken,
         );
-        await _afterRun(result, mother.id);
+        await _afterRun(result, mother.id, children: tokenChildren);
       } else {
         await state.ensureViewerId(mother);
         final freshMother = state.accountById(mother.id)!;
@@ -990,6 +1424,7 @@ class _MotherPanelState extends State<MotherPanel> {
         final forwardIds = <int>[];
         final childTokens = <String>[];
         final childTargets = <Map<String, dynamic>>[];
+        final tokenChildren = <MaxAccount>[];
         for (final child in prepared.children) {
           final id = await state.ensureViewerId(child);
           final fresh = state.accountById(child.id)!;
@@ -998,6 +1433,7 @@ class _MotherPanelState extends State<MotherPanel> {
             forwardIds.add(id);
           }
           if (fresh.hasApiSession) {
+            tokenChildren.add(fresh);
             childTokens.add(fresh.apiToken!);
             if (id != null) {
               final childProxy = fresh.isolation.proxyServer?.trim();
@@ -1026,9 +1462,15 @@ class _MotherPanelState extends State<MotherPanel> {
           forwardChildren: forwardIds.isNotEmpty,
           childrenJoin: childTokens.isNotEmpty,
           proxy: proxy,
-          onProgress: _log,
+          onProgress: trackProgress,
+          cancel: action.cancelToken,
         );
-        await _afterRun(result, mother.id);
+        await _afterRun(result, mother.id, children: tokenChildren.isNotEmpty ? tokenChildren : prepared.children);
+      }
+
+      if (action.cancelToken.isCancelled) {
+        _log('⏹ Остановлено пользователем', level: 'warn');
+        return;
       }
 
       if (result.ok) {
@@ -1053,7 +1495,7 @@ class _MotherPanelState extends State<MotherPanel> {
         _log('  · ${err['phase'] ?? '?'} ${err['hash'] ?? ''}: ${err['error'] ?? '?'}', level: 'warn');
       }
 
-      final webJoinUrls = prepared.inviteChatIds.isEmpty ? prepared.manualUrls : prepared.urls;
+      final webJoinUrls = prepared.urls;
       final shouldOpenWebConfirm = webJoinUrls.isNotEmpty &&
           prepared.children.isNotEmpty &&
           (result.forwarded > 0 ||
@@ -1063,17 +1505,244 @@ class _MotherPanelState extends State<MotherPanel> {
       if (shouldOpenWebConfirm) {
         await _confirmJoinLinksInChildBrowser(urls: webJoinUrls, children: prepared.children);
       }
+
+      final shouldPostJoin = mode == _MotherMode.childrenJoinOnly ||
+          mode == _MotherMode.forwardAndJoin ||
+          mode == _MotherMode.full;
+      if (shouldPostJoin && !action.cancelToken.isCancelled) {
+        final tokenChildren = <MaxAccount>[];
+        for (final child in prepared.children) {
+          final fresh = state.accountById(child.id);
+          if (fresh != null && fresh.hasApiSession) tokenChildren.add(fresh);
+        }
+        await _runPostJoinWrites(
+          tokenChildren: tokenChildren,
+          joinResults: result.results,
+        );
+      }
+
+      state.finishAction(
+        action.id,
+        status: result.ok ? ActiveActionStatus.completed : ActiveActionStatus.failed,
+        message: result.message,
+      );
+    } catch (e) {
+      _log('✗ $e', level: 'error');
+      state.finishAction(
+        action.id,
+        status: action.cancelToken.isCancelled
+            ? ActiveActionStatus.cancelled
+            : ActiveActionStatus.failed,
+        message: e.toString(),
+      );
     } finally {
+      if (action.isActive) {
+        state.finishAction(
+          action.id,
+          status: action.cancelToken.isCancelled
+              ? ActiveActionStatus.cancelled
+              : ActiveActionStatus.completed,
+        );
+      }
       if (mounted) setState(() => _running = false);
     }
   }
 
   Future<void> _run() => _runMode(_MotherMode.full);
 
+  Widget _buildSpeedFields(BuildContext context, AppState state) {
+    final theme = Theme.of(context);
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 10),
+      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Скорость', style: theme.textTheme.titleSmall?.copyWith(fontSize: 12)),
+            const SizedBox(height: 4),
+            Text(
+              'Пауза между шагами матки: вступление в группы, приглашение дочерних, пересылка.',
+              style: theme.textTheme.bodySmall?.copyWith(fontSize: 10, color: theme.hintColor),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    enabled: !_running,
+                    controller: _delayController,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    style: const TextStyle(fontSize: 12),
+                    decoration: const InputDecoration(
+                      labelText: 'Пауза между приглашениями (сек)',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                    onEditingComplete: () => _persistRateSettings(state),
+                    onSubmitted: (_) => _persistRateSettings(state),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton(
+                onPressed: _running ? null : () => _persistRateSettings(state),
+                child: const Text('Сохранить', style: TextStyle(fontSize: 11)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMembershipCard(BuildContext context, AppState state) {
+    final theme = Theme.of(context);
+    final trackedIds = <String>{
+      if (_motherId != null) _motherId!,
+      ..._childIds,
+    };
+    final records = state.storage.accountGroupMemberships.values
+        .where((m) => trackedIds.contains(m.accountId))
+        .toList();
+    final byAccount = <String, int>{};
+    for (final m in records) {
+      byAccount[m.accountId] = (byAccount[m.accountId] ?? 0) + 1;
+    }
+    final selected = _selectedGroupIds;
+    final verify = _lastVerify;
+
+    return Card(
+      margin: EdgeInsets.zero,
+      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Учёт вступлений',
+              style: theme.textTheme.titleSmall?.copyWith(fontSize: 12),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              records.isEmpty
+                  ? 'Пока пусто — после вступления/приглашения группы сохранятся здесь. '
+                      '«Проверить вступления» сверит матку и дочерних с выбранными каналами.'
+                  : 'В учёте: ${records.length} записей · ${byAccount.length} акк. · '
+                      'проверка по ${_selectedGroupIds.length} выбранным группам.',
+              style: theme.textTheme.bodySmall?.copyWith(fontSize: 10),
+            ),
+            if (byAccount.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              for (final entry in byAccount.entries.take(8))
+                Builder(
+                  builder: (_) {
+                    final account = state.accountById(entry.key);
+                    final inSelected = selected.isEmpty
+                        ? entry.value
+                        : state
+                            .membershipsFor(entry.key)
+                            .where((m) => selected.contains(m.chatId))
+                            .length;
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 3),
+                      child: Text(
+                        '· ${account?.profileDisplayName ?? entry.key}: '
+                        '${selected.isEmpty ? entry.value : '$inSelected/${selected.length}'} групп',
+                        style: const TextStyle(fontSize: 11),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    );
+                  },
+                ),
+            ],
+            if (verify != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                verify.allOk
+                    ? 'Последняя проверка: всё на месте (${verify.checked} акк.)'
+                    : 'Последняя проверка: нет в группах — ${verify.missingTotal} пропусков',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: verify.allOk ? const Color(0xFFA5D6A7) : Colors.orangeAccent,
+                ),
+              ),
+              for (final row in verify.rows.where((r) => !r.ok).take(6))
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(
+                    row.error != null
+                        ? '✗ ${row.accountLabel}: ${row.error}'
+                        : '✗ ${row.accountLabel}: нет в ${row.missingChatIds.length}',
+                    style: const TextStyle(fontSize: 10, color: Colors.orangeAccent),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDiscoverJoinCard(BuildContext context, {required bool motherHasToken}) {
+    final theme = Theme.of(context);
+    final known = StorageService.instance.seenDiscoverCount;
+    final inBase = StorageService.instance.channelCatalogEntries.length;
+
+    return Card(
+      margin: EdgeInsets.zero,
+      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.travel_explore, size: 16),
+                SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Поиск каналов',
+                    style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Общая база и вступление по маткам — вкладка «Каналы». '
+              'В базе: $inBase · известных: $known. '
+              'Здесь — ручные ссылки, каналы этой матки и выход.',
+              style: theme.textTheme.bodySmall?.copyWith(fontSize: 10),
+            ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: _running
+                  ? null
+                  : () => context.read<AppState>().setNavPage(AppNavPage.parse),
+              icon: const Icon(Icons.open_in_new, size: 16),
+              label: const Text('Открыть «Каналы»', style: TextStyle(fontSize: 11)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildMassInviteCard(BuildContext context, AppState state) {
     final plan = _massPlan ?? _computeMassPlan(state);
     final theme = Theme.of(context);
-    final uzbekCount = state.accounts.where((a) => a.isUzbek && !state.isMotherAccount(a.id)).length;
+    final childCount = state.accounts.where((a) => !state.isMotherAccount(a.id)).length;
     final readyMothers = state.motherClusters.where((c) {
       final id = c.motherAccountId;
       if (id == null) return false;
@@ -1095,7 +1764,7 @@ class _MotherPanelState extends State<MotherPanel> {
                 const SizedBox(width: 6),
                 Expanded(
                   child: Text(
-                    'Автонабор узб (≤${MotherInvitePlanner.defaultInvitesPerMother}/матка)',
+                    'Автонабор аккаунтов (≤${MotherInvitePlanner.defaultInvitesPerMother}/матка)',
                     style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
                   ),
                 ),
@@ -1103,7 +1772,7 @@ class _MotherPanelState extends State<MotherPanel> {
             ),
             const SizedBox(height: 6),
             Text(
-              'Маток с токеном: $readyMothers · Узб-акков: $uzbekCount · '
+              'Маток с токеном: $readyMothers · Аккаунтов: $childCount · '
               'Ёмкость: ${readyMothers * MotherInvitePlanner.defaultInvitesPerMother}',
               style: theme.textTheme.bodySmall?.copyWith(fontSize: 10),
             ),
@@ -1119,7 +1788,7 @@ class _MotherPanelState extends State<MotherPanel> {
               const SizedBox(height: 6),
               ...plan.motherSummaries.take(6).map(
                     (s) => Text(
-                      '· ${s.clusterName}: ${s.accountCount} узб → ${s.groupCount} групп',
+                      '· ${s.clusterName}: ${s.accountCount} акк → ${s.groupCount} групп',
                       style: theme.textTheme.bodySmall?.copyWith(fontSize: 10),
                     ),
                   ),
@@ -1175,8 +1844,8 @@ class _MotherPanelState extends State<MotherPanel> {
             ),
             const SizedBox(height: 4),
             Text(
-              'Узб = +998 или «узб» в названии. Аккаунты делятся по маткам (макс. 100), '
-              'затем равномерно по группам каждой матки.',
+              'Берутся все аккаунты, которые не назначены матками. Делятся по маткам '
+              '(макс. 100), затем равномерно по группам каждой матки.',
               style: theme.textTheme.bodySmall?.copyWith(fontSize: 9, color: theme.hintColor),
             ),
           ],
@@ -1191,13 +1860,18 @@ class _MotherPanelState extends State<MotherPanel> {
     final accounts = state.accounts;
     final clusters = state.motherClusters;
 
+    _hydrateRateSettings(state.rateSettings);
     _ensureActiveCluster(state);
 
     final occupiedElsewhere = state.accountMap.occupiedAccountIds(exceptClusterId: _activeClusterId);
-    final motherChoices = accounts.where((a) => !occupiedElsewhere.contains(a.id) || a.id == _motherId).toList();
-    final childChoices = accounts
-        .where((a) => a.id != _motherId && (!occupiedElsewhere.contains(a.id) || _childIds.contains(a.id)))
-        .toList();
+    // All accounts can be mother or child — occupied ones are moved here on select.
+    final motherChoices = accounts.toList();
+    final childChoices = accounts.where((a) => a.id != _motherId).toList();
+
+    String? otherClusterLabel(String accountId) {
+      if (!occupiedElsewhere.contains(accountId)) return null;
+      return state.clusterContainingAccount(accountId)?.name;
+    }
 
     if (_motherId != null && !accounts.any((a) => a.id == _motherId)) {
       _motherId = null;
@@ -1235,7 +1909,8 @@ class _MotherPanelState extends State<MotherPanel> {
           ),
         if (!_cliReady) const SizedBox(height: 8),
         Text(
-          'Несколько маток: у каждой свои дочерние аккаунты и каналы.',
+          'Связи матка ↔ дочерние задаются заранее — каналы для этого не нужны. '
+          'Отметьте аккаунт: он переедет к этой матке, даже если был у другой.',
           style: Theme.of(context).textTheme.bodySmall,
         ),
         const SizedBox(height: 10),
@@ -1318,6 +1993,8 @@ class _MotherPanelState extends State<MotherPanel> {
         if (clusters.isNotEmpty) ...[
           const SizedBox(height: 10),
           _buildMassInviteCard(context, state),
+          const SizedBox(height: 10),
+          _buildSpeedFields(context, state),
         ],
         if (clusters.isEmpty) const SizedBox.shrink() else ...[
         const SizedBox(height: 12),
@@ -1330,26 +2007,23 @@ class _MotherPanelState extends State<MotherPanel> {
             border: const OutlineInputBorder(),
             isDense: true,
             contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            helperText: occupiedElsewhere.isEmpty
-                ? null
-                : 'Аккаунты других маток скрыты',
+            helperText: 'Можно выбрать аккаунт с другой матки — он перепривяжется',
           ),
           items: [
             for (final a in motherChoices)
               DropdownMenuItem(
                 value: a.id,
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(a.label, overflow: TextOverflow.ellipsis, maxLines: 1),
-                    ),
-                    const SizedBox(width: 6),
-                    Icon(
-                      a.hasApiSession ? Icons.check_circle : Icons.warning_amber,
-                      size: 16,
-                      color: a.hasApiSession ? Colors.lightGreenAccent : Colors.orangeAccent,
-                    ),
-                  ],
+                child: Text(
+                  () {
+                    final other = otherClusterLabel(a.id);
+                    final mark = a.hasApiSession ? '✓' : '!';
+                    if (other == null || a.id == _motherId) {
+                      return '$mark  ${a.label}';
+                    }
+                    return '$mark  ${a.label} · сейчас: $other';
+                  }(),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
                 ),
               ),
           ],
@@ -1392,7 +2066,10 @@ class _MotherPanelState extends State<MotherPanel> {
         Row(
           children: [
             Expanded(
-              child: Text('Ссылка для матки ($manualHashCount)', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12)),
+              child: Text(
+                'Доп. ссылка ($manualHashCount)',
+                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+              ),
             ),
             TextButton.icon(
               onPressed: _running ? null : _pasteClipboard,
@@ -1405,21 +2082,19 @@ class _MotherPanelState extends State<MotherPanel> {
         TextField(
           controller: _linksController,
           enabled: !_running,
-          minLines: 3,
-          maxLines: 6,
+          minLines: 2,
+          maxLines: 4,
           style: const TextStyle(fontSize: 12),
-          decoration: InputDecoration(
-            hintText: _selectedGroupIds.isEmpty
-                ? 'Ссылка для матки и дочерних (каналы сняты)'
-                : 'Ссылка для вступления матки в новый канал',
-            helperText: _selectedGroupIds.isEmpty
-                ? 'Каналы не выбраны — дочерним уйдёт эта ссылка'
-                : 'Дочерним уходит ссылка из профиля канала — не эта',
-            border: const OutlineInputBorder(),
+          decoration: const InputDecoration(
+            hintText: 'https://max.ru/join/… — ещё один канал по своей ссылке',
+            helperText: 'Необязательно: добавится к выбранным каналам матки',
+            border: OutlineInputBorder(),
             isDense: true,
           ),
           onChanged: (_) => setState(() {}),
         ),
+        const SizedBox(height: 10),
+        _buildDiscoverJoinCard(context, motherHasToken: motherHasToken),
         const SizedBox(height: 10),
         Row(
           children: [
@@ -1473,8 +2148,41 @@ class _MotherPanelState extends State<MotherPanel> {
               icon: const Icon(Icons.link, size: 16),
               label: const Text('Взять ссылки из профиля', style: TextStyle(fontSize: 11)),
             ),
+            OutlinedButton.icon(
+              onPressed: _running ||
+                      _loadingGroups ||
+                      !_cliReady ||
+                      !motherHasToken ||
+                      _selectedGroupIds.isEmpty
+                  ? null
+                  : _leaveSelectedGroups,
+              icon: const Icon(Icons.logout, size: 16),
+              label: Text(
+                'Выйти (${_selectedGroupIds.length})',
+                style: const TextStyle(fontSize: 11),
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: _running ||
+                      _verifyingMembership ||
+                      !_cliReady ||
+                      _selectedGroupIds.isEmpty ||
+                      (_childIds.isEmpty && !motherHasToken)
+                  ? null
+                  : _verifyMemberships,
+              icon: _verifyingMembership
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.fact_check_outlined, size: 16),
+              label: const Text('Проверить вступления', style: TextStyle(fontSize: 11)),
+            ),
           ],
         ),
+        const SizedBox(height: 8),
+        _buildMembershipCard(context, state),
         const SizedBox(height: 6),
         if (_motherGroups.isEmpty)
           Text(
@@ -1521,9 +2229,9 @@ class _MotherPanelState extends State<MotherPanel> {
           Padding(
             padding: const EdgeInsets.only(top: 4, bottom: 4),
             child: Text(
-              _selectedGroupIds.isEmpty && manualHashCount > 0
-                  ? 'Только вставленная ссылка ($manualHashCount) — каналы не выбраны'
-                  : 'К обработке: $targetCount ссылок (вставлено: $manualHashCount, из каналов: $selectedGroupLinkCount)',
+              manualHashCount > 0
+                  ? 'К обработке: $selectedGroupLinkCount из каналов + $manualHashCount доп. ссылок'
+                  : 'К обработке: $targetCount ссылок из каналов матки',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 10, color: Colors.lightBlueAccent),
             ),
           ),
@@ -1542,13 +2250,18 @@ class _MotherPanelState extends State<MotherPanel> {
                     ? null
                     : () {
                         setState(() {
+                          // Everyone not tied to another cluster (channels not required).
                           _childIds
                             ..clear()
-                            ..addAll(childChoices.map((a) => a.id));
+                            ..addAll(
+                              childChoices
+                                  .where((a) => !occupiedElsewhere.contains(a.id))
+                                  .map((a) => a.id),
+                            );
                         });
                         _syncMapRelations();
                       },
-                child: const Text('Все', style: TextStyle(fontSize: 11)),
+                child: const Text('Все свободные', style: TextStyle(fontSize: 11)),
               ),
               TextButton(
                 onPressed: _running
@@ -1562,91 +2275,129 @@ class _MotherPanelState extends State<MotherPanel> {
             ],
           ],
         ),
-        SizedBox(
-          height: 108,
-          child: childChoices.isEmpty
-              ? Center(
-                  child: Text(
-                    accounts.length <= 1
-                        ? 'Добавьте ещё аккаунты'
-                        : 'Свободных аккаунтов нет — они заняты другими матками',
-                    style: const TextStyle(fontSize: 11),
-                    textAlign: TextAlign.center,
+        if (childChoices.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 12),
+            child: Text(
+              'Добавьте ещё аккаунты',
+              style: TextStyle(fontSize: 11),
+              textAlign: TextAlign.center,
+            ),
+          )
+        else
+          for (final a in childChoices)
+            Builder(
+              builder: (context) {
+                final other = otherClusterLabel(a.id);
+                final tokenLine = a.hasApiSession
+                    ? (a.viewerId != null ? 'id ${a.viewerId}' : 'токен ✓')
+                    : 'нет токена — не сможет вступить';
+                final subtitle = other != null && !_childIds.contains(a.id)
+                    ? '$tokenLine · сейчас: $other (отметьте — перенести)'
+                    : tokenLine;
+                return CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  visualDensity: VisualDensity.compact,
+                  title: Text(a.label, style: const TextStyle(fontSize: 12), overflow: TextOverflow.ellipsis),
+                  subtitle: Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: a.hasApiSession
+                          ? (other != null && !_childIds.contains(a.id) ? Colors.amberAccent : null)
+                          : Colors.orangeAccent,
+                    ),
                   ),
-                )
-              : ListView(
-                  children: [
-                    for (final a in childChoices)
-                      CheckboxListTile(
-                        contentPadding: EdgeInsets.zero,
-                        dense: true,
-                        visualDensity: VisualDensity.compact,
-                        title: Text(a.label, style: const TextStyle(fontSize: 12), overflow: TextOverflow.ellipsis),
-                        subtitle: Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                a.hasApiSession
-                                    ? (a.viewerId != null ? 'id ${a.viewerId}' : 'токен ✓')
-                                    : 'нет токена — не сможет вступить',
-                                style: TextStyle(
-                                  fontSize: 10,
-                                  color: a.hasApiSession ? null : Colors.orangeAccent,
-                                ),
-                              ),
-                            ),
-                            if (!a.hasApiSession)
-                              TextButton(
-                                onPressed: _running || _capturingToken ? null : () => _captureChildToken(a),
-                                style: TextButton.styleFrom(
-                                  visualDensity: VisualDensity.compact,
-                                  padding: EdgeInsets.zero,
-                                  minimumSize: Size.zero,
-                                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                ),
-                                child: const Text('Токен', style: TextStyle(fontSize: 10)),
-                              ),
-                          ],
-                        ),
-                        value: _childIds.contains(a.id),
-                        onChanged: _running
-                            ? null
-                            : (v) {
-                                setState(() {
-                                  if (v == true) {
-                                    _childIds.add(a.id);
-                                  } else {
-                                    _childIds.remove(a.id);
-                                  }
-                                });
-                                _syncMapRelations();
-                              },
-                      ),
-                  ],
-                ),
-        ),
+                  secondary: !a.hasApiSession
+                      ? TextButton(
+                          onPressed: _running || _capturingToken ? null : () => _captureChildToken(a),
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: EdgeInsets.zero,
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          child: const Text('Токен', style: TextStyle(fontSize: 10)),
+                        )
+                      : null,
+                  value: _childIds.contains(a.id),
+                  onChanged: _running
+                      ? null
+                      : (v) {
+                          setState(() {
+                            if (v == true) {
+                              _childIds.add(a.id);
+                            } else {
+                              _childIds.remove(a.id);
+                            }
+                          });
+                          _syncMapRelations();
+                        },
+                );
+              },
+            ),
         Padding(
           padding: const EdgeInsets.only(bottom: 8),
           child: Text(
-            'Добавление дочерних: сначала по ID, если не вышло — пересылка ссылки, затем вступление дочернего',
+            'Привязка не требует каналов. Каналы нужны только для вступления/пересылки.',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 10),
           ),
         ),
-        Row(
-          children: [
-            const Text('Пауза мс', style: TextStyle(fontSize: 11)),
-            const SizedBox(width: 8),
-            SizedBox(
-              width: 72,
-              child: TextField(
-                enabled: !_running,
-                keyboardType: TextInputType.number,
-                style: const TextStyle(fontSize: 12),
-                decoration: const InputDecoration(isDense: true, border: OutlineInputBorder()),
-                controller: _delayController,
-              ),
+        Card(
+          margin: const EdgeInsets.only(bottom: 10),
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Builder(
+              builder: (context) {
+                final withTemplate = _childIds.where((id) {
+                  final t = state.joinTemplateForAccount(id);
+                  return t != null && t.isActive;
+                }).length;
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      'Письмо после вступления',
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(fontSize: 12),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      withTemplate > 0
+                          ? 'У $withTemplate из ${_childIds.length} дочерних назначен шаблон. '
+                              'После «Дочерние по ссылкам» / «Переслать и вступить» / «Всё сразу» они напишут в чат.'
+                          : 'Тексты настраиваются во вкладке «Шаблоны». '
+                              'Назначьте шаблон дочерним — иначе после вступления писать некому.',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 10),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        TextButton.icon(
+                          onPressed: _running
+                              ? null
+                              : () => context.read<AppState>().setNavPage(AppNavPage.templates),
+                          icon: const Icon(Icons.description_outlined, size: 16),
+                          label: const Text('Шаблоны', style: TextStyle(fontSize: 11)),
+                        ),
+                        const Spacer(),
+                        OutlinedButton.icon(
+                          onPressed: _running ||
+                                  _childIds.isEmpty ||
+                                  _selectedGroupIds.isEmpty ||
+                                  withTemplate == 0
+                              ? null
+                              : _writeNowToSelectedChats,
+                          icon: const Icon(Icons.send, size: 16),
+                          label: const Text('Написать сейчас', style: TextStyle(fontSize: 11)),
+                        ),
+                      ],
+                    ),
+                  ],
+                );
+              },
             ),
-          ],
+          ),
         ),
         if (_childIds.isEmpty && childChoices.isNotEmpty)
           Padding(

@@ -10,13 +10,40 @@ class DesktopFilePicker {
   static Future<List<String>> pickTextFiles({
     String title = 'Выберите файлы с токенами',
     List<String> extensions = const ['txt', 'log', 'js', 'json'],
+  }) {
+    return pickFiles(
+      title: title,
+      filterLabel: 'Токены',
+      extensions: extensions,
+      multiselect: true,
+    );
+  }
+
+  /// Single image file for channel avatar / cover.
+  static Future<String?> pickImage({
+    String title = 'Выберите фото канала',
+  }) async {
+    final files = await pickFiles(
+      title: title,
+      filterLabel: 'Изображения',
+      extensions: const ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'],
+      multiselect: false,
+    );
+    return files.isEmpty ? null : files.first;
+  }
+
+  static Future<List<String>> pickFiles({
+    required String title,
+    required String filterLabel,
+    required List<String> extensions,
+    bool multiselect = true,
   }) async {
     if (!Platform.isWindows) {
       throw UnsupportedError('Выбор файлов поддерживается только на Windows');
     }
 
     final filterParts = extensions.map((e) => '*.$e').join(';');
-    final filter = 'Токены ($filterParts)|$filterParts|Все файлы (*.*)|*.*';
+    final filter = '$filterLabel ($filterParts)|$filterParts|Все файлы (*.*)|*.*';
     final listFile = File(
       '${Directory.systemTemp.path}${Platform.pathSeparator}'
       'max-desktop-pick-${DateTime.now().microsecondsSinceEpoch}.txt',
@@ -27,7 +54,7 @@ Add-Type -AssemblyName System.Windows.Forms
 \$dialog = New-Object System.Windows.Forms.OpenFileDialog
 \$dialog.Title = ${jsonEncode(title)}
 \$dialog.Filter = ${jsonEncode(filter)}
-\$dialog.Multiselect = \$true
+\$dialog.Multiselect = ${multiselect ? '\$true' : '\$false'}
 \$dialog.CheckFileExists = \$true
 if (\$dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) {
   exit 0

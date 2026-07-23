@@ -1,0 +1,35 @@
+name: webview_flutter_windows
+description: >-
+  A WebView2-powered webview for Flutter on Windows with seamless composition,
+  keyboard focus integration, and a typed event API.
+  Local MAX Desktop fork: allows secondary engines (desktop_multi_window) to
+  reuse an existing per-thread DispatcherQueue instead of failing with
+  "The platform is not supported".
+version: 1.0.0+max1
+repository: https://github.com/omar-hanafy/webview_flutter_windows
+issue_tracker: https://github.com/omar-hanafy/webview_flutter_windows/issues
+topics:
+  - webview
+  - webview2
+  - windows
+  - desktop
+  - browser
+
+environment:
+  sdk: ^3.12.0
+  flutter: ">=3.44.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      windows:
+        pluginClass: WebviewWindowsPlugin
