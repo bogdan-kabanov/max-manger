@@ -1,0 +1,15 @@
+[Unit]
+Description=MAX Desktop update uploader
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/max-desktop/uploader.env
+ExecStart=/usr/bin/python3 /opt/max-desktop/max_desktop_uploader.py
+Restart=on-failure
+RestartSec=3
+User=root
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

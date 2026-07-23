@@ -52,4 +52,6 @@ tools/max_auth/_test_*.mjs
 .env
 .env.*
 scripts/setup_update_server.py.bak
+scripts/.deploy_secrets
+scripts/_upload_tmp.py
 

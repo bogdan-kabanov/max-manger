@@ -52,7 +52,15 @@ cd max-desktop
 .\scripts\deploy_update.ps1
 ```
 
-SSH (ключ уже настроен): `ssh max-updates` или `ssh -F scripts/ssh_config.max-updates max-updates`
+Первый раз (один пароль root → ставит HTTP-uploader + deploy-ключ без фразы):
+
+```powershell
+$env:UPDATE_SERVER_PASSWORD = '...'   # только для bootstrap
+python .\scripts\bootstrap_update_deploy.py
+.\scripts\deploy_update.ps1
+```
+
+Дальше пароль не нужен: заливка идёт на `http://…:8080/_deploy/upload` по токену из `scripts/.deploy_secrets` (в git не попадает). Fallback — SCP с ключом `~/.ssh/max_desktop_deploy`.
 
 ## Запуск (разработка)
 

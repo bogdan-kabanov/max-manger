@@ -1,11 +1,15 @@
 # SSH helper for MAX Desktop update server (no passwords in repo).
-# Usage:
+# Prefer HTTP deploy via scripts/deploy_update.ps1 (token in .deploy_secrets).
+# Key auth fallback:
 #   ssh -F scripts/ssh_config.max-updates max-updates
 #   scp -F scripts/ssh_config.max-updates file max-updates:/var/www/max-desktop/
 
 Host max-updates
   HostName 145.63.130.142
   User root
-  IdentityFile ~/.ssh/id_ed25519
+  IdentityFile ~/.ssh/max_desktop_deploy
   IdentitiesOnly yes
+  BatchMode yes
+  ConnectTimeout 20
   ServerAliveInterval 30
+  StrictHostKeyChecking accept-new
