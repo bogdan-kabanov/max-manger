@@ -62,7 +62,7 @@ class ChildPostJoinRunner {
     for (final row in joinResults) {
       if (row['ok'] != true) continue;
       final phase = row['phase']?.toString();
-      if (phase != null && phase != 'child_join') continue;
+      if (phase != null && phase != 'child_join' && phase != 'join') continue;
       final chatId = row['chatId']?.toString().trim() ?? '';
       if (chatId.isEmpty) continue;
 
@@ -80,6 +80,10 @@ class ChildPostJoinRunner {
             }
           }
         }
+      }
+      // Solo mother join: phase=join without childUserId → единственный аккаунт в списке.
+      if (child == null && phase == 'join' && tokenChildren.length == 1) {
+        child = tokenChildren.first;
       }
       if (child == null) continue;
 

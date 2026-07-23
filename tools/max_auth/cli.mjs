@@ -1324,6 +1324,12 @@ async function deliverChildCascade(client, motherToken, channel, child, delayMs,
     }
   }
 
+  progress(
+    `[Каскад] inviteUsers не сработал для id ${userId} («${title}») — пробуем ссылку`,
+    'warn',
+    { error: inviteOutcome.error ?? null },
+  );
+
   let hash = groupHash(channel);
   if (!hash) {
     try {
@@ -1340,12 +1346,15 @@ async function deliverChildCascade(client, motherToken, channel, child, delayMs,
       await sendInviteLinkToUser(client, userId, hash);
       results.push({ ok: true, phase: 'forward', hash, childUserId: userId, title });
       progress(`[Пересылка] ✓ ${joinUrl(hash).slice(0, 40)}… → id ${userId}`);
-      await sleep(Math.max(delayMs, 1200));
 
       if (childToken) {
         let childClient;
         try {
           const childProxy = child?.proxy ?? currentProxyUrl();
+          progress(`[Дочерний] вступаем по ссылке сразу…`, 'info', {
+            userId,
+            proxy: childProxy ? 'set' : null,
+          });
           const connected = await connectWithToken(childToken, childProxy);
           childClient = connected.client;
           const joinEntry = await joinIfNotMember(childClient, hash, connected.profileId, progress);
@@ -1373,6 +1382,12 @@ async function deliverChildCascade(client, motherToken, channel, child, delayMs,
         } finally {
           if (childClient) await childClient.disconnect().catch(() => undefined);
         }
+      } else {
+        progress(
+          `[Дочерний] токена нет — ссылка отправлена, вступление вручную/отдельным шагом`,
+          'warn',
+          { userId },
+        );
       }
       return;
     } catch (error) {
@@ -2474,7 +2489,16 @@ async function cmdMotherDeploy({
   });
 }
 
-async function cmdInviteChildren({ token, links, groups = [], chatIds = [], inviteUserIds = [], delayMs = 2500 }) {
+async function cmdInviteChildren({
+  token,
+  links,
+  groups = [],
+  chatIds = [],
+  inviteUserIds = [],
+  childTargets = [],
+  childTokens = [],
+  delayMs = 2500,
+}) {
   if (!token) fail('Укажите токен матки');
 
   const hashes = mergeHashesFromLinksAndGroups(links, groups);
@@ -2485,7 +2509,8 @@ async function cmdInviteChildren({ token, links, groups = [], chatIds = [], invi
   }
 
   const userIds = [...new Set((inviteUserIds ?? []).map((id) => String(id)).filter(Boolean))];
-  if (userIds.length === 0) fail('Укажите ID дочерних аккаунтов');
+  const hasTargets = (childTargets ?? []).some((t) => String(t?.userId ?? '').trim());
+  if (userIds.length === 0 && !hasTargets) fail('Укажите ID дочерних аккаунтов');
 
   const { client } = await connectWithToken(token);
   const motherToken = token;
@@ -2515,48 +2540,68 @@ async function cmdInviteChildren({ token, links, groups = [], chatIds = [], invi
       try {
         await ensureConnected(client, motherToken);
         const entry = await resolveGroupEntry(client, hash);
-        resolvedGroups.push(entry);
+        const existing = resolvedGroups.find((g) => String(g.chatId) === String(entry.chatId));
+        if (existing) {
+          existing.hash = entry.hash ?? existing.hash;
+          existing.title = entry.title ?? existing.title;
+          progress(`[Приглашение] дубль chatId ${entry.chatId} — объединяем`, 'debug');
+        } else {
+          resolvedGroups.push(entry);
+        }
         results.push({ hash, ok: true, phase: 'resolve', chatId: entry.chatId, title: entry.title });
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        progress(`[Приглашение] ✗ resolve ${hash?.slice?.(0, 12) ?? hash}: ${message}`, 'warn');
         results.push({
           hash,
           ok: false,
           phase: 'resolve',
-          error: error instanceof Error ? error.message : String(error),
+          error: message,
         });
       }
       if (i < hashes.length - 1) await sleep(delayMs);
     }
 
-    for (let i = 0; i < resolvedGroups.length; i++) {
-      const group = resolvedGroups[i];
-      progress(`[Приглашение] ${i + 1}/${resolvedGroups.length} → «${group.title ?? group.chatId}»`);
-      try {
-        await ensureConnected(client, motherToken);
-        await inviteUsersToChat(client, group.chatId, userIds);
-        results.push({
-          hash: group.hash,
-          ok: true,
-          phase: 'invite',
-          chatId: group.chatId,
-          invited: userIds.length,
-        });
-      } catch (error) {
-        results.push({
-          hash: group.hash,
-          ok: false,
-          phase: 'invite',
-          chatId: group.chatId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-      if (i < resolvedGroups.length - 1) await sleep(delayMs);
+    if (resolvedGroups.length === 0) {
+      fail('Не удалось найти группы для приглашения');
     }
+
+    progress(`[Приглашение] каскад: inviteUsers → ссылка в ЛС → вступление дочки`, 'info', {
+      groups: resolvedGroups.length,
+      inviteUserIds: userIds,
+      childTargets: (childTargets ?? []).length,
+      childTokens: (childTokens ?? []).length,
+    });
+
+    await deliverChildrenHybrid(client, motherToken, {
+      channels: resolvedGroups,
+      childTargets,
+      forwardUserIds: userIds,
+      childTokens,
+      delayMs,
+      results,
+      progress,
+    });
   } finally {
     await safeDisconnect(client);
   }
 
-  const invitedCount = results.filter((r) => r.phase === 'invite' && r.ok).length;
+  const invitedCount = results.filter(
+    (r) => r.phase === 'invite' && r.ok && r.method === 'add_member',
+  ).length;
+  const alreadyCount = results.filter(
+    (r) => r.phase === 'invite' && r.method === 'already_member',
+  ).length;
+  const forwardedCount = results.filter((r) => r.phase === 'forward' && r.ok).length;
+  const childJoined = results.filter((r) => r.phase === 'child_join' && r.ok).length;
+  const failedCount = results.filter(
+    (r) =>
+      (r.phase === 'invite' || r.phase === 'forward' || r.phase === 'child_join') && !r.ok,
+  ).length;
+  progress(
+    `[Приглашение] итог: invite=${invitedCount}, уже=${alreadyCount}, ` +
+      `пересылка=${forwardedCount}, вход дочки=${childJoined}, ошибок=${failedCount}`,
+  );
   ok({
     results,
     groups: resolvedGroups.map((g) => ({
@@ -2566,8 +2611,9 @@ async function cmdInviteChildren({ token, links, groups = [], chatIds = [], invi
       inviteUrl: g.hash ? joinUrl(g.hash) : null,
       type: 'CHAT',
     })),
-    joined: resolvedGroups.length,
-    invited: invitedCount,
+    joined: childJoined,
+    invited: invitedCount + alreadyCount,
+    forwarded: forwardedCount,
     total: Math.max(resolvedGroups.length, hashes.length + directChatIds.length),
   });
 }

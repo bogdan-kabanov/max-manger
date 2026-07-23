@@ -63,9 +63,14 @@ class PipelineLaunchPlan {
   int get totalWithoutLink => slots.fold(0, (s, e) => s + e.withoutLinkCount);
   int get childCount => slots.length;
 
+  /// Все слоты — соло (воркер = матка, дочек нет).
+  bool get isSoloWorkers =>
+      slots.isNotEmpty && slots.every((s) => s.child.id == s.mother.id);
+
   String get summaryLine {
     if (error != null) return error!;
-    return 'Дочек: $childCount · групп: $totalGroups'
+    final who = isSoloWorkers ? 'Аккаунтов' : 'Дочек';
+    return '$who: $childCount · групп: $totalGroups'
         ' (со ссылкой: $totalWithLink'
         '${totalWithoutLink > 0 ? ', без ссылки: $totalWithoutLink' : ''})';
   }
@@ -95,7 +100,8 @@ class PipelineGroupPlanner {
         final child = byId[childId];
         if (child != null && child.hasApiSession) children.add(child);
       }
-      if (children.isEmpty) continue;
+      // Соло-матка без дочек: сама вступает в назначенные группы.
+      final workers = children.isNotEmpty ? children : [mother];
 
       final groups = catalog
           .where((e) => e.assignedMotherAccountId == motherId)
@@ -103,8 +109,8 @@ class PipelineGroupPlanner {
           .toList();
       if (groups.isEmpty) continue;
 
-      final buckets = MotherInvitePlanner.splitEvenly(groups, children.length);
-      for (var i = 0; i < children.length; i++) {
+      final buckets = MotherInvitePlanner.splitEvenly(groups, workers.length);
+      for (var i = 0; i < workers.length; i++) {
         final bucket = buckets[i];
         if (bucket.isEmpty) continue;
         slots.add(
@@ -112,7 +118,7 @@ class PipelineGroupPlanner {
             clusterId: cluster.id,
             clusterName: cluster.name,
             mother: mother,
-            child: children[i],
+            child: workers[i],
             groups: bucket,
           ),
         );
@@ -123,7 +129,7 @@ class PipelineGroupPlanner {
           clusterId: cluster.id,
           clusterName: cluster.name,
           mother: mother,
-          children: children,
+          children: workers,
           groupCount: groups.length,
           withLinkCount: groups.where((g) => g.hasInviteLink).length,
           withoutLinkCount: groups.where((g) => !g.hasInviteLink).length,

@@ -18,7 +18,6 @@ import 'automation_panel.dart';
 import 'channel_catalog_panel.dart';
 import 'funnels_panel.dart';
 import 'join_templates_panel.dart';
-import 'mother_panel.dart';
 import 'pipeline_assign_panel.dart';
 import 'pipeline_journal_panel.dart';
 import 'pipeline_launch_panel.dart';
@@ -124,7 +123,7 @@ class _AppNavShellState extends State<AppNavShell> {
               AppNavPage.more => const _MorePage(),
               AppNavPage.groups => const _GroupsPage(),
               AppNavPage.chats => const _ChatsPage(),
-              AppNavPage.mother => const _MotherPage(),
+              AppNavPage.mother => const _LaunchPage(),
               AppNavPage.automation => const _AutomationPage(),
               AppNavPage.emulator => const _EmulatorPage(),
               AppNavPage.help => const _HelpPage(),
@@ -370,9 +369,8 @@ class _MorePage extends StatelessWidget {
           padding: EdgeInsets.fromLTRB(8, 0, 8, 12),
           child: Text('Ещё', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
         ),
-        tile(Icons.hive_outlined, 'Матка (расширенно)', 'Старые режимы join/invite/forward', AppNavPage.mother),
         tile(Icons.folder_outlined, 'Группы на карте', 'Workflow-группы выбранного аккаунта', AppNavPage.groups),
-        tile(Icons.chat_bubble_outline, 'Чаты', 'Каталог чатов MAX по маткам', AppNavPage.chats),
+        tile(Icons.chat_bubble_outline, 'Чаты', 'Каталог чатов MAX по аккаунтам', AppNavPage.chats),
         tile(Icons.smart_toy_outlined, 'Авто', 'Автоответы, ИИ, сценарии', AppNavPage.automation),
         tile(Icons.phone_android_outlined, 'Эмулятор', 'AVD / зеркало', AppNavPage.emulator),
         tile(Icons.help_outline, 'Справка', 'Регистрация и QR', AppNavPage.help),
@@ -391,25 +389,6 @@ class _ChatsPage extends StatelessWidget {
     return AccountChatsTab(
       key: ValueKey('nav-chats-${state.selectedAccount?.id ?? 'all'}'),
       focusAccountId: state.selectedAccount?.id,
-    );
-  }
-}
-
-class _MotherPage extends StatelessWidget {
-  const _MotherPage();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
-          child: Text('Матка (расширенно)', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-        ),
-        Expanded(child: MotherPanel(embedded: false)),
-        MapLogPanel(),
-      ],
     );
   }
 }

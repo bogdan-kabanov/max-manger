@@ -210,12 +210,35 @@ class MaxAuthService {
     return lower.contains('enotfound') ||
         lower.contains('etimedout') ||
         lower.contains('econnrefused') ||
+        lower.contains('econnreset') ||
         lower.contains('getaddrinfo') ||
         lower.contains('network') ||
         lower.contains('dns') ||
         lower.contains('proxy') ||
+        lower.contains('прокси') ||
+        lower.contains('socks') ||
+        lower.contains('сокс') ||
         lower.contains('socket hang up') ||
-        lower.contains('network.error');
+        lower.contains('network.error') ||
+        lower.contains('407') ||
+        lower.contains('err_no_supported_proxies') ||
+        lower.contains('недоступен') ||
+        lower.contains('таймаут');
+  }
+
+  /// Proxy login/host/port problems (not a bad MAX token).
+  static bool isProxyError(String? error) {
+    if (error == null) return false;
+    final lower = error.toLowerCase();
+    return lower.contains('socks') ||
+        lower.contains('сокс') ||
+        lower.contains('proxy authentication') ||
+        lower.contains('прокси отклонил') ||
+        lower.contains('прокси недоступен') ||
+        lower.contains('логин/пароль прокси') ||
+        lower.contains('формат прокси') ||
+        lower.contains('err_no_supported_proxies') ||
+        (lower.contains('407') && lower.contains('прокси'));
   }
 
   /// Map login-token result to a persisted account health status.
@@ -225,7 +248,10 @@ class MaxAuthService {
     String? error,
   }) {
     if (ok) return AccountHealthStatus.ok;
-    if (isNetworkError(error) || isNetworkError(code)) {
+    if (isProxyError(error) ||
+        isProxyError(code) ||
+        isNetworkError(error) ||
+        isNetworkError(code)) {
       return AccountHealthStatus.networkError;
     }
     final hay = '${code ?? ''} ${error ?? ''}'.toLowerCase();
@@ -335,23 +361,106 @@ class MaxAuthService {
 
   static String mapError(String? error) {
     if (error == null || error.trim().isEmpty) {
-      return 'MAX не принял токен (пустой ответ). Попробуйте ещё раз или смените прокси.';
+      return 'MAX не ответил при проверке токена.\n'
+          'Попробуйте ещё раз. Если снова пусто — смените прокси или сеть.';
     }
-    if (isNetworkError(error)) {
-      return 'Нет доступа к ws-api.oneme.ru (DNS/сеть/прокси). '
-          'Аккаунт можно добавить без проверки — вход через web.max.ru в приложении.';
-    }
+
     final lower = error.toLowerCase();
-    if (lower.contains('login') ||
-        lower.contains('auth') ||
-        lower.contains('token') ||
+
+    // Proxy errors MUST be checked before generic "auth" — e.g.
+    // "Socks5 Authentication failed" contains "auth" but is NOT a bad token.
+    final proxyMapped = _mapProxyError(lower, error);
+    if (proxyMapped != null) return proxyMapped;
+
+    if (lower.contains('enotfound') ||
+        lower.contains('getaddrinfo') ||
+        lower.contains('dns')) {
+      return 'Нет DNS / хост не найден.\n'
+          'Проверьте интернет. Если указан прокси — нет опечатки в адресе хоста.\n'
+          'Аккаунт можно добавить без проверки.';
+    }
+    if (lower.contains('etimedout') ||
+        lower.contains('timeout') ||
+        lower.contains('timed out')) {
+      return 'Таймаут соединения с MAX (сеть или прокси).\n'
+          'Прокси может быть мёртвым или слишком медленным. Смените прокси и повторите.\n'
+          'Аккаунт можно добавить без проверки.';
+    }
+    if (lower.contains('econnrefused') || lower.contains('econnreset')) {
+      return 'Соединение сброшено / отказано.\n'
+          'Частая причина — неверный порт прокси или прокси выключен.\n'
+          'Аккаунт можно добавить без проверки.';
+    }
+    if (lower.contains('socket hang up') || lower.contains('network')) {
+      return 'Сбой сети при обращении к ws-api.oneme.ru.\n'
+          'Проверьте интернет и прокси. Аккаунт можно добавить без проверки.';
+    }
+
+    if (lower.contains('login.token') ||
+        lower.contains('error.login') ||
         lower.contains('unauthorized') ||
         lower.contains('forbidden') ||
-        lower.contains('error.login') ||
-        lower.contains('session')) {
-      return 'MAX не принял токен: $error\n'
-          'Скопируйте свежий An_… из web.max.ru и проверьте прокси.';
+        lower.contains('invalid token') ||
+        lower.contains('token expired') ||
+        (lower.contains('session') && lower.contains('invalid')) ||
+        (lower.contains('token') &&
+            (lower.contains('invalid') ||
+                lower.contains('expired') ||
+                lower.contains('reject')))) {
+      return 'Токен MAX отклонён (устарел или неверный).\n'
+          'Скопируйте свежий An_… из web.max.ru (консоль → localStorage __oneme_auth).\n'
+          'Прокси тут ни при чём — нужен новый токен.';
+    }
+
+    // Last resort: keep technical detail, but say what it likely is.
+    if (lower.contains('login') || lower.contains('auth')) {
+      return 'Ошибка входа MAX: $error\n'
+          'Если в тексте про proxy/socks — чините прокси. '
+          'Иначе скопируйте свежий токен An_… из web.max.ru.';
     }
     return error;
+  }
+
+  static String? _mapProxyError(String lower, String original) {
+    if (lower.contains('socks') &&
+        (lower.contains('authentication failed') ||
+            lower.contains('auth failed') ||
+            lower.contains('not authorized') ||
+            lower.contains('unauthorized'))) {
+      return 'Прокси отклонил логин/пароль (SOCKS5).\n'
+          '• Логин и пароль должны быть целиком (часто обрезается начало логина).\n'
+          '• Формат: socks5://логин:пароль@хост:порт\n'
+          '• Порт должен быть именно SOCKS5 у провайдера (не HTTP).\n'
+          'Токен MAX тут ни при чём.';
+    }
+    if (lower.contains('proxy authentication') ||
+        lower.contains('authentication required') ||
+        lower.contains('407')) {
+      return 'Прокси отклонил логин/пароль (HTTP).\n'
+          'Проверьте user:pass и что порт — HTTP-прокси. '
+          'Формат: http://логин:пароль@хост:порт\n'
+          'Токен MAX тут ни при чём.';
+    }
+    if (lower.contains('err_no_supported_proxies')) {
+      return 'Неверный формат прокси для браузера.\n'
+          'Не вставляйте логин:пароль внутрь --proxy-server. '
+          'Используйте: socks5://user:pass@host:port или http://user:pass@host:port';
+    }
+    if ((lower.contains('socks') || lower.contains('proxy')) &&
+        (lower.contains('econnrefused') ||
+            lower.contains('enotfound') ||
+            lower.contains('etimedout') ||
+            lower.contains('could not connect') ||
+            lower.contains('connect failed'))) {
+      return 'Прокси недоступен (хост/порт).\n'
+          'Проверьте адрес, порт и что прокси онлайн у провайдера.\n'
+          'Токен MAX тут ни при чём.';
+    }
+    if (lower.contains('socks') && lower.contains('failed')) {
+      return 'Ошибка SOCKS5-прокси: $original\n'
+          'Проверьте строку socks5://логин:пароль@хост:порт. '
+          'Токен MAX обычно ни при чём.';
+    }
+    return null;
   }
 }

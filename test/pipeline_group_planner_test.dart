@@ -30,7 +30,7 @@ void main() {
         MaxChannelCatalogEntry(
           chatId: 'chat-$i',
           title: 'G$i',
-          inviteHash: 'invitelink$hash$i'.padRight(12, 'x'),
+          inviteHash: 'invitelink${i}abcdefgh'.padRight(12, 'x'),
           assignedMotherAccountId: mother.id,
         ),
     ];
@@ -52,5 +52,37 @@ void main() {
         for (final g in s.groups) g.chatId,
     };
     expect(allIds.length, 10);
+  });
+
+  test('solo mother without children gets all assigned groups', () {
+    final mother = _acc('m1', token: 't');
+    final cluster = MotherCluster(
+      id: 'cl1',
+      name: 'Solo',
+      motherAccountId: mother.id,
+      childAccountIds: {},
+    );
+    final catalog = [
+      for (var i = 0; i < 4; i++)
+        MaxChannelCatalogEntry(
+          chatId: 'chat-$i',
+          title: 'G$i',
+          inviteHash: 'invitelink${i}abcdefgh'.padRight(12, 'x'),
+          assignedMotherAccountId: mother.id,
+        ),
+    ];
+
+    final plan = PipelineGroupPlanner.build(
+      clusters: [cluster],
+      accounts: [mother],
+      catalog: catalog,
+    );
+
+    expect(plan.ok, isTrue);
+    expect(plan.isSoloWorkers, isTrue);
+    expect(plan.slots.length, 1);
+    expect(plan.slots.single.child.id, mother.id);
+    expect(plan.totalGroups, 4);
+    expect(plan.summaryLine, contains('Аккаунтов: 1'));
   });
 }

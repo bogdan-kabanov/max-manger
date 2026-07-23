@@ -1470,7 +1470,7 @@ class _AccountsTab extends StatelessWidget {
             const Padding(
               padding: EdgeInsets.fromLTRB(8, 0, 8, 8),
               child: Text(
-                'В кластере пока нет аккаунтов — назначьте их во вкладке «Матка».',
+                'В кластере пока нет аккаунтов — создайте кластер во вкладке «Раздача».',
                 style: TextStyle(fontSize: 11, color: Colors.white54),
               ),
             ),

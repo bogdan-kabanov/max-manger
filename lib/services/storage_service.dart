@@ -510,6 +510,13 @@ class StorageService {
         });
       });
 
+  Future<void> removeMembershipsWhere(
+    bool Function(AccountGroupMembership m) test,
+  ) =>
+      _mutate(() async {
+        accountGroupMemberships.removeWhere((_, m) => test(m));
+      });
+
   /// Replace expected memberships for [accountId] with what list-groups returned
   /// among [expectedChatIds] (or all listed groups if expected is null).
   Future<void> syncMembershipsFromListedGroups({

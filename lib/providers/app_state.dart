@@ -603,20 +603,25 @@ class AppState extends ChangeNotifier {
     );
   }
 
-  /// ChatIds already held by any child of the given mothers' clusters.
+  /// ChatIds already held by workers (дочки, либо соло-матка без дочек).
   Set<String> joinedChatIdsForPipeline() {
-    final childIds = <String>{};
+    final workerIds = <String>{};
     for (final c in motherClusters) {
-      childIds.addAll(c.childAccountIds);
+      if (c.childAccountIds.isEmpty) {
+        final mid = c.motherAccountId;
+        if (mid != null) workerIds.add(mid);
+      } else {
+        workerIds.addAll(c.childAccountIds);
+      }
     }
     final ids = <String>{};
     for (final m in storage.accountGroupMemberships.values) {
-      if (childIds.contains(m.accountId)) ids.add(m.chatId);
+      if (workerIds.contains(m.accountId)) ids.add(m.chatId);
     }
     return ids;
   }
 
-  /// Children of [motherAccountId] who already joined [chatId].
+  /// Workers of [motherAccountId] who already joined [chatId] (дочки или соло-матка).
   List<MaxAccount> childrenJoinedChat({
     required String motherAccountId,
     required String chatId,
@@ -626,8 +631,13 @@ class AppState extends ChangeNotifier {
           orElse: () => null,
         );
     if (cluster == null || chatId.trim().isEmpty) return const [];
+    final workerIds = cluster.childAccountIds.isNotEmpty
+        ? cluster.childAccountIds
+        : [
+            if (cluster.motherAccountId != null) cluster.motherAccountId!,
+          ];
     final out = <MaxAccount>[];
-    for (final id in cluster.childAccountIds) {
+    for (final id in workerIds) {
       if (!membershipChatIdsFor(id).contains(chatId)) continue;
       final a = accountById(id);
       if (a != null) out.add(a);
@@ -724,9 +734,12 @@ class AppState extends ChangeNotifier {
         continue;
       }
 
+      final soloWorker = slot.child.id == slot.mother.id;
       track(
-        '[${doneSlots + 1}/${plan.slots.length}] «${slot.child.label}» ← ${withLink.length} групп '
-        '(матка «${slot.mother.label}»)',
+        soloWorker
+            ? '[${doneSlots + 1}/${plan.slots.length}] «${slot.child.label}» ← ${withLink.length} групп (сам)'
+            : '[${doneSlots + 1}/${plan.slots.length}] «${slot.child.label}» ← ${withLink.length} групп '
+                '(матка «${slot.mother.label}»)',
       );
 
       final groups = [
@@ -963,19 +976,30 @@ class AppState extends ChangeNotifier {
           continue;
         }
 
-        track('Приглашение «${slot.child.label}» → ${chatIds.length} групп (по ID)');
+        track('Приглашение «${slot.child.label}» → ${chatIds.length} групп (каскад ID→ссылка)');
+        final childTargets = <Map<String, dynamic>>[];
+        if (fresh.hasApiSession) {
+          final childProxy = fresh.isolation.proxyServer?.trim();
+          childTargets.add({
+            'userId': viewerId,
+            'token': fresh.apiToken!,
+            if (fresh.phone != null) 'phone': fresh.phone!,
+            if (childProxy != null && childProxy.isNotEmpty) 'proxy': childProxy,
+          });
+        }
         final inviteResult = await MaxMotherService.inviteChildren(
           motherToken: mother.apiToken!,
           links: const [],
           groups: groupsPayload,
           chatIds: chatIds,
           inviteUserIds: [viewerId],
+          childTargets: childTargets,
           delayMs: rateSettings.motherJoinDelayMs,
           proxy: motherProxyOrNull,
           onProgress: track,
           cancel: cancel,
         );
-        invitedTotal += inviteResult.invited;
+        invitedTotal += inviteResult.invited + inviteResult.joined;
 
         await recordMembershipsFromJoinResults(
           motherAccountId: mother.id,
@@ -1190,26 +1214,12 @@ class AppState extends ChangeNotifier {
     }
   }
 
-  /// Mothers never send join/template messages — only children (and free accounts).
-  bool canSendJoinMessages(String accountId) => !isMotherAccount(accountId);
-
-  /// Drop join-template assignments stuck on mother accounts.
-  Future<void> _stripMotherJoinTemplateAssignments() async {
-    final mothers = accountMap.allMotherAccountIds;
-    if (mothers.isEmpty) return;
-    final assign = Map<String, String>.from(storage.joinTemplateByAccountId);
-    final before = assign.length;
-    assign.removeWhere((id, _) => mothers.contains(id));
-    if (assign.length == before) return;
-    await _persistJoinTemplateAssignments(assign);
-  }
+  /// Any account with a token may send join/template messages (incl. solo mother).
+  bool canSendJoinMessages(String accountId) => true;
 
   Future<void> setAccountJoinTemplate(String accountId, String? templateId) async {
     final assign = Map<String, String>.from(storage.joinTemplateByAccountId);
     if (templateId == null || templateId.isEmpty) {
-      assign.remove(accountId);
-    } else if (isMotherAccount(accountId)) {
-      // Mothers must not hold write templates.
       assign.remove(accountId);
     } else if (joinMessageTemplateById(templateId) != null) {
       assign[accountId] = templateId;
@@ -1224,13 +1234,8 @@ class AppState extends ChangeNotifier {
     required Iterable<String> accountIds,
   }) async {
     if (joinMessageTemplateById(templateId) == null) return;
-    final mothers = accountMap.allMotherAccountIds;
     final assign = Map<String, String>.from(storage.joinTemplateByAccountId);
     for (final accountId in accountIds) {
-      if (mothers.contains(accountId)) {
-        assign.remove(accountId);
-        continue;
-      }
       assign[accountId] = templateId;
     }
     await _persistJoinTemplateAssignments(assign);
@@ -1270,6 +1275,29 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Сбросить учёт вступлений дочек выбранной матки по chatId (без выхода из MAX).
+  Future<int> clearChildMembershipsForChats({
+    required String motherAccountId,
+    required Iterable<String> chatIds,
+  }) async {
+    final chats = chatIds.map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
+    if (chats.isEmpty) return 0;
+    final cluster = motherClusters.cast<MotherCluster?>().firstWhere(
+          (c) => c?.motherAccountId == motherAccountId,
+          orElse: () => null,
+        );
+    final childIds = cluster?.childAccountIds.toSet() ?? {};
+    if (childIds.isEmpty) return 0;
+    var removed = 0;
+    final before = storage.accountGroupMemberships.length;
+    await storage.removeMembershipsWhere(
+      (m) => childIds.contains(m.accountId) && chats.contains(m.chatId),
+    );
+    removed = before - storage.accountGroupMemberships.length;
+    notifyListeners();
+    return removed;
+  }
+
   Future<void> syncMembershipsFromListedGroups({
     required String accountId,
     required List<MotherGroupChannel> listed,
@@ -1298,6 +1326,7 @@ class AppState extends ChangeNotifier {
       final chatId = row['chatId']?.toString().trim() ?? '';
       if (chatId.isEmpty) continue;
       final phase = row['phase']?.toString();
+      final method = row['method']?.toString();
       final title = (row['title']?.toString() ?? titleByChatId[chatId] ?? '').trim();
 
       if (phase == 'join' && motherAccountId != null) {
@@ -1311,31 +1340,36 @@ class AppState extends ChangeNotifier {
         continue;
       }
 
-      if (phase == 'child_join' || phase == 'invite') {
-        MaxAccount? child;
-        final idx = (row['childIndex'] as num?)?.toInt();
-        if (idx != null && idx >= 0 && idx < children.length) {
-          child = children[idx];
-        } else {
-          final userId = row['childUserId'];
-          if (userId != null) {
-            for (final a in children) {
-              if (a.viewerId != null && a.viewerId.toString() == userId.toString()) {
-                child = a;
-                break;
-              }
+      // Учитываем только реальное вступление / подтверждённый add_member.
+      // phase=invite без method или после одной пересылки ссылки — не членство.
+      final childJoined = phase == 'child_join';
+      final invitedOk = phase == 'invite' &&
+          (method == 'add_member' || method == 'already_member');
+      if (!childJoined && !invitedOk) continue;
+
+      MaxAccount? child;
+      final idx = (row['childIndex'] as num?)?.toInt();
+      if (idx != null && idx >= 0 && idx < children.length) {
+        child = children[idx];
+      } else {
+        final userId = row['childUserId'];
+        if (userId != null) {
+          for (final a in children) {
+            if (a.viewerId != null && a.viewerId.toString() == userId.toString()) {
+              child = a;
+              break;
             }
           }
         }
-        if (child == null) continue;
-        items.add(AccountGroupMembership(
-          accountId: child.id,
-          chatId: chatId,
-          title: title,
-          joinedAt: now,
-          lastVerifiedAt: now,
-        ));
       }
+      if (child == null) continue;
+      items.add(AccountGroupMembership(
+        accountId: child.id,
+        chatId: chatId,
+        title: title,
+        joinedAt: now,
+        lastVerifiedAt: now,
+      ));
     }
 
     if (items.isNotEmpty) {
@@ -1496,8 +1530,6 @@ class AppState extends ChangeNotifier {
       return 0;
     }
 
-    await _stripMotherJoinTemplateAssignments();
-
     var accountIds = joinTemplateWriterAccountIds(templateId);
     final filter = onlyAccountIds?.toSet();
     if (filter != null && filter.isNotEmpty) {
@@ -1541,10 +1573,6 @@ class AppState extends ChangeNotifier {
       for (final account in targetAccounts) {
         if (action.cancelToken.isCancelled) break;
         if (!canSendJoinMessages(account.id)) {
-          browser.logMessage(
-            '[Шаблон] «${account.label}»: матка — пропуск (не пишет в чаты)',
-            level: 'warn',
-          );
           continue;
         }
 
@@ -2084,6 +2112,8 @@ class AppState extends ChangeNotifier {
   }
 
   void setNavPage(AppNavPage page) {
+    // Legacy route: mother tools live on Запуск / Раздача / Профили.
+    if (page == AppNavPage.mother) page = AppNavPage.launch;
     if (navPage == page) return;
     navPage = page;
     notifyListeners();
@@ -2465,7 +2495,6 @@ class AppState extends ChangeNotifier {
       edges: AccountMapState(motherClusters: cleaned).edgesFromClusters(),
     );
     await _persistAccountMap(withEdges);
-    await _stripMotherJoinTemplateAssignments();
   }
 
   Future<MotherCluster> addMotherCluster({String? name, String? motherAccountId}) async {
@@ -3288,13 +3317,6 @@ class AppState extends ChangeNotifier {
         browser.logMessage('Сценарий эмулятора: аккаунт не найден', level: 'error');
         return;
       }
-      if (isMotherAccount(account.id) && _scenarioSendsChatMessages(scenario)) {
-        browser.logMessage(
-          'Сценарий «${scenario.name}»: матка «${account.label}» не пишет в чаты — пропуск',
-          level: 'warn',
-        );
-        return;
-      }
       try {
         await EmulatorMacroRunner.instance.runScenario(
           account,
@@ -3311,14 +3333,6 @@ class AppState extends ChangeNotifier {
       browser.logMessage(
         'Сценарий «${scenario.name}»: аккаунт не найден',
         level: 'error',
-      );
-      return;
-    }
-
-    if (isMotherAccount(account.id) && _scenarioSendsChatMessages(scenario)) {
-      browser.logMessage(
-        'Сценарий «${scenario.name}»: матка «${account.label}» не пишет в чаты — пропуск',
-        level: 'warn',
       );
       return;
     }

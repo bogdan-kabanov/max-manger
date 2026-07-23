@@ -374,13 +374,15 @@ class MaxMotherService {
     );
   }
 
-  /// Mother invites child accounts to groups (matka already joined).
+  /// Mother invites children: inviteUsers → forward link → child join (cascade).
   static Future<MotherJoinResult> inviteChildren({
     required String motherToken,
     required List<String> links,
     List<Map<String, dynamic>> groups = const [],
     List<String> chatIds = const [],
     required List<int> inviteUserIds,
+    List<Map<String, dynamic>> childTargets = const [],
+    List<String> childTokens = const [],
     int delayMs = 2500,
     String? proxy,
     MotherProgressCallback? onProgress,
@@ -394,6 +396,8 @@ class MaxMotherService {
         if (groups.isNotEmpty) 'groups': groups,
         if (chatIds.isNotEmpty) 'chatIds': chatIds,
         'inviteUserIds': inviteUserIds,
+        if (childTargets.isNotEmpty) 'childTargets': childTargets,
+        if (childTokens.isNotEmpty) 'childTokens': childTokens,
         'delayMs': delayMs,
       },
       onProgress: onProgress,

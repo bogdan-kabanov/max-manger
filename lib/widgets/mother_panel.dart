@@ -567,6 +567,19 @@ class _MotherPanelState extends State<MotherPanel> {
           _log(
             '  · [${i + 1}/${slots.length}] «${slot.group.title}» ← ${inviteIds.length} акк',
           );
+          final childTargets = <Map<String, dynamic>>[];
+          for (final child in slot.children) {
+            final freshChild = state.accountById(child.id) ?? child;
+            final id = freshChild.viewerId ?? child.viewerId;
+            if (id == null || !freshChild.hasApiSession) continue;
+            final childProxy = freshChild.isolation.proxyServer?.trim();
+            childTargets.add({
+              'userId': id,
+              'token': freshChild.apiToken!,
+              if (freshChild.phone != null) 'phone': freshChild.phone!,
+              if (childProxy != null && childProxy.isNotEmpty) 'proxy': childProxy,
+            });
+          }
           final result = await MaxMotherService.inviteChildren(
             motherToken: fresh.apiToken!,
             links: const [],
@@ -579,6 +592,7 @@ class _MotherPanelState extends State<MotherPanel> {
               },
             ],
             inviteUserIds: inviteIds,
+            childTargets: childTargets,
             delayMs: delayMs,
             proxy: fresh.isolation.proxyServer,
             onProgress: _log,
@@ -592,7 +606,10 @@ class _MotherPanelState extends State<MotherPanel> {
             total: plan.slots.length,
           );
           if (result.ok) {
-            _log('    ✓ приглашено: ${result.invited}');
+            _log(
+              '    ✓ invite=${result.invited}, пересылка=${result.forwarded}, '
+              'вход=${result.joined}',
+            );
           } else {
             _log('    ✗ ${result.message}', level: 'warn');
           }
@@ -1299,9 +1316,24 @@ class _MotherPanelState extends State<MotherPanel> {
         await state.ensureViewerId(mother);
         final m = state.accountById(mother.id)!;
         final inviteIds = <int>[];
+        final childTargets = <Map<String, dynamic>>[];
         for (final child in prepared.children) {
           final id = await state.ensureViewerId(child);
+          final fresh = state.accountById(child.id)!;
           if (id != null) inviteIds.add(id);
+          if (id != null && fresh.hasApiSession) {
+            final childProxy = fresh.isolation.proxyServer?.trim();
+            childTargets.add({
+              'userId': id,
+              'token': fresh.apiToken!,
+              if (fresh.phone != null) 'phone': fresh.phone!,
+              if ((childProxy != null && childProxy.isNotEmpty) ||
+                  (proxy != null && proxy.trim().isNotEmpty))
+                'proxy': (childProxy != null && childProxy.isNotEmpty)
+                    ? childProxy
+                    : proxy!.trim(),
+            });
+          }
         }
         if (inviteIds.isEmpty) {
           _failPrepare('Нет viewerId у дочерних — используйте «Переслать и вступить»');
@@ -1318,6 +1350,7 @@ class _MotherPanelState extends State<MotherPanel> {
           groups: prepared.groups,
           chatIds: prepared.inviteChatIds,
           inviteUserIds: inviteIds,
+          childTargets: childTargets,
           delayMs: delay,
           proxy: proxy,
           onProgress: trackProgress,
@@ -1522,16 +1555,25 @@ class _MotherPanelState extends State<MotherPanel> {
 
       final shouldPostJoin = mode == _MotherMode.childrenJoinOnly ||
           mode == _MotherMode.forwardAndJoin ||
-          mode == _MotherMode.full;
+          mode == _MotherMode.full ||
+          mode == _MotherMode.motherJoin;
       if (shouldPostJoin && !action.cancelToken.isCancelled) {
         final tokenChildren = <MaxAccount>[];
-        for (final child in prepared.children) {
-          final fresh = state.accountById(child.id);
-          if (fresh != null && fresh.hasApiSession) tokenChildren.add(fresh);
+        if (mode == _MotherMode.motherJoin) {
+          final freshMother = state.accountById(mother.id);
+          if (freshMother != null && freshMother.hasApiSession) {
+            tokenChildren.add(freshMother);
+          }
+        } else {
+          for (final child in prepared.children) {
+            final fresh = state.accountById(child.id);
+            if (fresh != null && fresh.hasApiSession) tokenChildren.add(fresh);
+          }
         }
         await _runPostJoinWrites(
           tokenChildren: tokenChildren,
           joinResults: result.results,
+          cancel: action.cancelToken,
         );
       }
 
@@ -2460,7 +2502,7 @@ class _MotherPanelState extends State<MotherPanel> {
               onPressed: _running || !_cliReady || !motherHasToken
                   ? null
                   : () => _runMode(_MotherMode.motherJoin),
-              child: const Text('Только матка', style: TextStyle(fontSize: 11)),
+              child: const Text('Вступить + шаблон', style: TextStyle(fontSize: 11)),
             ),
           ],
         ),

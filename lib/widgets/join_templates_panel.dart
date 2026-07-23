@@ -208,8 +208,8 @@ class _JoinTemplatesPanelState extends State<JoinTemplatesPanel> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Нет дочерних с токеном: привяжите шаблон к матке или назначьте дочкам '
-            '(матки сами не пишут)',
+            'Нет аккаунтов с токеном: назначьте шаблон аккаунту '
+            '(в т.ч. одиночной матке) и проверьте API-токен',
           ),
         ),
       );
@@ -728,31 +728,12 @@ class _AccountsTab extends StatelessWidget {
                       onPickTemplate: (id) => onPickTemplateForAccount(childId, id),
                     ),
                 if (cluster.childAccountIds.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
-                    child: Wrap(
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      spacing: 4,
-                      children: [
-                        const Text(
-                          'В кластере пока нет дочерних — назначьте вручную:',
-                          style: TextStyle(fontSize: 11, color: Colors.white54),
-                        ),
-                        TextButton(
-                          onPressed: () =>
-                              context.read<AppState>().setNavPage(AppNavPage.mother),
-                          style: TextButton.styleFrom(
-                            visualDensity: VisualDensity.compact,
-                            padding: const EdgeInsets.symmetric(horizontal: 6),
-                            minimumSize: Size.zero,
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          child: const Text(
-                            'Ещё → Матка',
-                            style: TextStyle(fontSize: 11),
-                          ),
-                        ),
-                      ],
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(8, 0, 8, 8),
+                    child: Text(
+                      'Дочек нет — соло: шаблон назначается на сам аккаунт кластера. '
+                      'Добавить дочек можно при создании кластера во вкладке «Раздача».',
+                      style: TextStyle(fontSize: 11, color: Colors.white54),
                     ),
                   ),
                 const SizedBox(height: 10),

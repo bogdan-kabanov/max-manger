@@ -899,7 +899,7 @@ class _ChannelCatalogPanelState extends State<ChannelCatalogPanel> {
         const SizedBox(height: 4),
         if (mothers.isEmpty)
           Text(
-            'Создайте матку во вкладке «Матка» и привяжите аккаунт с токеном.',
+            'Создайте кластер во вкладке «Раздача» и привяжите аккаунт с токеном.',
             style: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 11),
           )
         else ...[

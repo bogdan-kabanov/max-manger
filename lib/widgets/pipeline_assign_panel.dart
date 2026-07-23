@@ -6,8 +6,10 @@ import '../models/account_map_state.dart';
 import '../models/active_action.dart';
 import '../models/max_account.dart';
 import '../models/max_channel_catalog_entry.dart';
+import '../models/mother_group_channel.dart';
 import '../models/pipeline_journal_event.dart';
 import '../providers/app_state.dart';
+import '../services/max_mother_service.dart';
 import '../utils/join_link_parser.dart';
 
 enum _AssignFilter { free, mother, all }
@@ -29,6 +31,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
   final _selectedChatIds = <String>{};
   String _query = '';
   bool _joining = false;
+  bool _busy = false;
   /// For non-RU children that cannot join by link — mother joins and invites by ID.
   bool _inviteById = true;
 
@@ -119,14 +122,53 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
     final mid = e.assignedMotherAccountId ?? _selectedMotherId;
     if (mid == null) return '';
     final cluster = _clusterForMother(state, mid);
-    final childIds = cluster?.childAccountIds ?? const <String>[];
-    if (childIds.isEmpty) return 'нет дочек';
+    if (cluster == null) return '';
+    final childIds = cluster.childAccountIds;
+    final solo = childIds.isEmpty;
+    final total = solo ? 1 : childIds.length;
     final joined = state.childrenJoinedChat(motherAccountId: mid, chatId: e.chatId);
     final names = joined.map((a) => a.label).join(', ');
+    final label = solo ? 'акк' : 'дочки';
     if (joined.isEmpty) {
-      return 'дочки: никто не вступил (0/${childIds.length})';
+      return '$label: никто не вступил (0/$total)';
     }
-    return 'дочки: ${joined.length}/${childIds.length} · $names';
+    return '$label: ${joined.length}/$total · $names';
+  }
+
+  Future<void> _clearJoinedMarks(AppState state) async {
+    final motherId = _selectedMotherId;
+    if (motherId == null || _selectedChatIds.isEmpty) return;
+    final n = _selectedChatIds.length;
+    final go = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Сбросить учёт вступлений?'),
+        content: Text(
+          'Убрать отметку «уже вступали» у дочек по $n выбранным каналам.\n'
+          'Из MAX никто не выйдет — только локальный учёт, чтобы можно было пригласить снова.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Сбросить')),
+        ],
+      ),
+    );
+    if (go != true || !mounted) return;
+    final removed = await state.clearChildMembershipsForChats(
+      motherAccountId: motherId,
+      chatIds: _selectedChatIds,
+    );
+    if (!mounted) return;
+    setState(() {});
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          removed > 0
+              ? 'Сброшено отметок: $removed'
+              : 'Нечего сбрасывать — учёта по выбранным нет',
+        ),
+      ),
+    );
   }
 
   Future<void> _pasteLinks(AppState state) async {
@@ -353,6 +395,315 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
     setState(() => _selectedChatIds.clear());
   }
 
+  Future<void> _createCluster(AppState state) async {
+    if (state.accounts.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Сначала добавьте аккаунт во вкладке «Профили»')),
+      );
+      return;
+    }
+
+    final occupied = <String>{
+      for (final c in state.motherClusters)
+        if (c.motherAccountId != null) c.motherAccountId!,
+      for (final c in state.motherClusters) ...c.childAccountIds,
+    };
+    final mothers = state.accounts.toList();
+    var motherId = mothers
+            .firstWhere(
+              (a) => !occupied.contains(a.id),
+              orElse: () => mothers.first,
+            )
+            .id;
+    final childIds = <String>{};
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setLocal) {
+            return AlertDialog(
+              title: const Text('Новый кластер'),
+              content: SizedBox(
+                width: 420,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    DropdownButtonFormField<String>(
+                      value: motherId,
+                      decoration: const InputDecoration(
+                        labelText: 'Аккаунт (матка / соло)',
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                      ),
+                      items: [
+                        for (final a in mothers)
+                          DropdownMenuItem(
+                            value: a.id,
+                            child: Text(
+                              '${a.label}${a.hasApiSession ? '' : ' · нет токена'}',
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                      ],
+                      onChanged: (v) {
+                        if (v == null) return;
+                        setLocal(() {
+                          motherId = v;
+                          childIds.remove(v);
+                        });
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      'Дочерние (необязательно — без них соло-режим):',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 220),
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: [
+                          for (final a in mothers.where((x) => x.id != motherId))
+                            CheckboxListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              value: childIds.contains(a.id),
+                              title: Text(a.label, style: const TextStyle(fontSize: 13)),
+                              onChanged: (v) => setLocal(() {
+                                if (v == true) {
+                                  childIds.add(a.id);
+                                } else {
+                                  childIds.remove(a.id);
+                                }
+                              }),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+                FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Создать')),
+              ],
+            );
+          },
+        );
+      },
+    );
+    if (ok != true || !mounted) return;
+
+    final cluster = await state.addMotherCluster(motherAccountId: motherId);
+    await state.setMotherClusterRelations(
+      clusterId: cluster.id,
+      motherId: motherId,
+      childIds: childIds,
+    );
+    if (!mounted) return;
+    setState(() => _selectedMotherId = motherId);
+  }
+
+  Future<void> _editClusterChildren(AppState state) async {
+    final motherId = _selectedMotherId;
+    if (motherId == null) return;
+    final cluster = _clusterForMother(state, motherId);
+    if (cluster == null) return;
+
+    final childIds = {...cluster.childAccountIds};
+    final candidates = state.accounts.where((a) => a.id != motherId).toList();
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setLocal) {
+            return AlertDialog(
+              title: const Text('Дочерние аккаунты'),
+              content: SizedBox(
+                width: 420,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 320),
+                  child: candidates.isEmpty
+                      ? const Text('Нет других аккаунтов — добавьте в «Профили».')
+                      : ListView(
+                          shrinkWrap: true,
+                          children: [
+                            for (final a in candidates)
+                              CheckboxListTile(
+                                dense: true,
+                                contentPadding: EdgeInsets.zero,
+                                value: childIds.contains(a.id),
+                                title: Text(a.label, style: const TextStyle(fontSize: 13)),
+                                onChanged: (v) => setLocal(() {
+                                  if (v == true) {
+                                    childIds.add(a.id);
+                                  } else {
+                                    childIds.remove(a.id);
+                                  }
+                                }),
+                              ),
+                          ],
+                        ),
+                ),
+              ),
+              actions: [
+                TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+                FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Сохранить')),
+              ],
+            );
+          },
+        );
+      },
+    );
+    if (ok != true || !mounted) return;
+    await state.setMotherClusterRelations(
+      clusterId: cluster.id,
+      motherId: motherId,
+      childIds: childIds,
+    );
+  }
+
+  Future<void> _leaveSelected(AppState state) async {
+    if (_busy || _joining) return;
+    final motherId = _selectedMotherId;
+    if (motherId == null || _selectedChatIds.isEmpty) return;
+    final mother = state.accountById(motherId);
+    if (mother == null || !mother.hasApiSession) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('У выбранного аккаунта нет API-токена')),
+      );
+      return;
+    }
+
+    final chatIds = _selectedChatIds.toList();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Выйти из групп?'),
+        content: Text(
+          '«${mother.label}» выйдет из ${chatIds.length} '
+          '${chatIds.length == 1 ? 'группы' : 'групп'}.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Выйти')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    if (state.browser.activeAccount?.id == mother.id) {
+      await state.browser.releaseWebview();
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+    }
+
+    setState(() => _busy = true);
+    final action = state.beginAction(
+      kind: ActiveActionKind.leaveGroups,
+      title: 'Выход из каналов',
+      subtitle: '«${mother.label}» · ${chatIds.length}',
+    );
+    try {
+      await state.ensureViewerId(mother);
+      final m = state.accountById(mother.id)!;
+      final result = await MaxMotherService.leaveGroups(
+        token: m.apiToken!,
+        chatIds: chatIds,
+        delayMs: state.rateSettings.motherJoinDelayMs,
+        proxy: m.isolation.proxyServer,
+        onProgress: (msg) => state.updateActionProgress(action.id, message: msg),
+        cancel: action.cancelToken,
+      );
+      final leftIds = result.results
+          .where((r) => r['ok'] == true && r['chatId'] != null)
+          .map((r) => r['chatId'].toString())
+          .toSet();
+      if (leftIds.isNotEmpty) {
+        await state.removeGroupMemberships(accountId: mother.id, chatIds: leftIds);
+        if (mounted) {
+          setState(() => _selectedChatIds.removeWhere(leftIds.contains));
+        }
+      }
+      state.finishAction(
+        action.id,
+        status: action.cancelToken.isCancelled
+            ? ActiveActionStatus.cancelled
+            : (result.ok ? ActiveActionStatus.completed : ActiveActionStatus.failed),
+        message: result.message,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.message)));
+      }
+    } catch (e) {
+      state.finishAction(action.id, status: ActiveActionStatus.failed, message: e.toString());
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _verifySelected(AppState state) async {
+    if (_busy || _joining) return;
+    final motherId = _selectedMotherId;
+    if (motherId == null || _selectedChatIds.isEmpty) return;
+    final mother = state.accountById(motherId);
+    if (mother == null) return;
+
+    final expected = state.channelCatalog
+        .where((e) => _selectedChatIds.contains(e.chatId))
+        .map(
+          (e) => MotherGroupChannel(
+            chatId: e.chatId,
+            title: e.title,
+            inviteHash: e.inviteHash,
+          ),
+        )
+        .toList();
+    if (expected.isEmpty) return;
+
+    final cluster = _clusterForMother(state, motherId);
+    final accountIds = <String>{
+      mother.id,
+      ...?cluster?.childAccountIds,
+    };
+    final withToken = state.accounts
+        .where((a) => accountIds.contains(a.id) && a.hasApiSession)
+        .map((a) => a.id)
+        .toList();
+    if (withToken.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Нет аккаунтов с токеном для проверки')),
+      );
+      return;
+    }
+
+    setState(() => _busy = true);
+    try {
+      final summary = await state.verifyAccountsInGroups(
+        accountIds: withToken,
+        expectedGroups: expected,
+        onLog: (msg, {String level = 'info'}) {},
+      );
+      if (!mounted) return;
+      final msg = summary.allOk
+          ? '✓ Все на месте в выбранных группах'
+          : '⚠ Пропусков: ${summary.missingTotal}';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
@@ -360,6 +711,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
     final mothers = _mothers(state);
     final entries = _filtered(state);
     final scheme = Theme.of(context).colorScheme;
+    final locked = _joining || _busy;
     final freeCount = state.channelCatalog.where((e) => !e.isAssigned).length;
     final assignedToSelected = _selectedMotherId == null
         ? 0
@@ -391,22 +743,33 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
               ),
               const SizedBox(height: 4),
               Text(
-                'Назначение матке → вступление дочек здесь же. '
-                '«65 каналов матки» в расширенной Матке — это только то, куда матка уже вошла сама; '
-                'здесь каталог назначений (сейчас $assignedToSelected).',
+                'Назначение аккаунту → вступление / проверка / выход здесь же. '
+                'Дальше шаблон во вкладке «Шаблоны» и «Запуск».',
                 style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant, height: 1.35),
               ),
             ],
           ),
         ),
         if (mothers.isEmpty)
-          const Expanded(
+          Expanded(
             child: Center(
               child: Padding(
-                padding: EdgeInsets.all(24),
-                child: Text(
-                  'Нет маток. Создайте кластер матка→дочки на карте профилей.',
-                  textAlign: TextAlign.center,
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Нет кластеров. Создайте аккаунт-матку (можно без дочек — соло).',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: scheme.onSurfaceVariant),
+                    ),
+                    const SizedBox(height: 16),
+                    FilledButton.icon(
+                      onPressed: () => _createCluster(state),
+                      icon: const Icon(Icons.add),
+                      label: const Text('Создать кластер'),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -414,30 +777,50 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
         else ...[
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: DropdownButtonFormField<String>(
-              value: _selectedMotherId,
-              decoration: const InputDecoration(
-                labelText: 'Матка',
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-              items: [
-                for (final m in mothers)
-                  DropdownMenuItem(
-                    value: m.id,
-                    child: Text(
-                      '${m.label} · ${_clusterForMother(state, m.id)?.childAccountIds.length ?? 0} дочек · '
-                      '${state.channelCatalog.where((e) => e.assignedMotherAccountId == m.id).length} групп',
-                      overflow: TextOverflow.ellipsis,
+            child: Row(
+              children: [
+                Expanded(
+                  child: DropdownButtonFormField<String>(
+                    value: _selectedMotherId,
+                    decoration: const InputDecoration(
+                      labelText: 'Матка / аккаунт',
+                      border: OutlineInputBorder(),
+                      isDense: true,
                     ),
+                    items: [
+                      for (final m in mothers)
+                        DropdownMenuItem(
+                          value: m.id,
+                          child: Text(
+                            '${m.label} · ${_clusterForMother(state, m.id)?.childAccountIds.length ?? 0} дочек · '
+                            '${state.channelCatalog.where((e) => e.assignedMotherAccountId == m.id).length} групп',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                    onChanged: locked
+                        ? null
+                        : (v) => setState(() {
+                              _selectedMotherId = v;
+                              if (_filter == _AssignFilter.mother) _selectedChatIds.clear();
+                            }),
                   ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.outlined(
+                  tooltip: 'Дочерние',
+                  onPressed: locked || _selectedMotherId == null
+                      ? null
+                      : () => _editClusterChildren(state),
+                  icon: const Icon(Icons.group_outlined),
+                ),
+                const SizedBox(width: 4),
+                IconButton.outlined(
+                  tooltip: 'Ещё кластер',
+                  onPressed: locked ? null : () => _createCluster(state),
+                  icon: const Icon(Icons.add),
+                ),
               ],
-              onChanged: _joining
-                  ? null
-                  : (v) => setState(() {
-                        _selectedMotherId = v;
-                        if (_filter == _AssignFilter.mother) _selectedChatIds.clear();
-                      }),
             ),
           ),
           const SizedBox(height: 8),
@@ -451,7 +834,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                 FilterChip(
                   label: Text('Свободные ($freeCount)'),
                   selected: _filter == _AssignFilter.free,
-                  onSelected: _joining
+                  onSelected: locked
                       ? null
                       : (_) => setState(() {
                             _filter = _AssignFilter.free;
@@ -459,9 +842,9 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                           }),
                 ),
                 FilterChip(
-                  label: Text('Эта матка ($assignedToSelected)'),
+                  label: Text('Этот аккаунт ($assignedToSelected)'),
                   selected: _filter == _AssignFilter.mother,
-                  onSelected: _joining
+                  onSelected: locked
                       ? null
                       : (_) => setState(() {
                             _filter = _AssignFilter.mother;
@@ -471,7 +854,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                 FilterChip(
                   label: Text('Все (${state.channelCatalog.length})'),
                   selected: _filter == _AssignFilter.all,
-                  onSelected: _joining
+                  onSelected: locked
                       ? null
                       : (_) => setState(() {
                             _filter = _AssignFilter.all;
@@ -479,8 +862,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                           }),
                 ),
                 OutlinedButton.icon(
-                  onPressed:
-                      _joining || _selectedMotherId == null ? null : () => _pasteLinks(state),
+                  onPressed: locked || _selectedMotherId == null ? null : () => _pasteLinks(state),
                   icon: const Icon(Icons.link, size: 16),
                   label: const Text('Вставить ссылки', style: TextStyle(fontSize: 12)),
                   style: OutlinedButton.styleFrom(
@@ -502,21 +884,19 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                   FilterChip(
                     label: const Text('Все статусы', style: TextStyle(fontSize: 11)),
                     selected: _joinFilter == _JoinFilter.all,
-                    onSelected: _joining
-                        ? null
-                        : (_) => setState(() => _joinFilter = _JoinFilter.all),
+                    onSelected: locked ? null : (_) => setState(() => _joinFilter = _JoinFilter.all),
                   ),
                   FilterChip(
                     label: Text('Без вступлений ($pendingCount)', style: const TextStyle(fontSize: 11)),
                     selected: _joinFilter == _JoinFilter.pending,
-                    onSelected: _joining
+                    onSelected: locked
                         ? null
                         : (_) => setState(() => _joinFilter = _JoinFilter.pending),
                   ),
                   FilterChip(
                     label: Text('Уже вступали ($joinedCount)', style: const TextStyle(fontSize: 11)),
                     selected: _joinFilter == _JoinFilter.joined,
-                    onSelected: _joining
+                    onSelected: locked
                         ? null
                         : (_) => setState(() => _joinFilter = _JoinFilter.joined),
                   ),
@@ -527,7 +907,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
             child: TextField(
-              enabled: !_joining,
+              enabled: !locked,
               decoration: const InputDecoration(
                 hintText: 'Поиск…',
                 isDense: true,
@@ -542,7 +922,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
             child: Row(
               children: [
                 TextButton(
-                  onPressed: entries.isEmpty || _joining
+                  onPressed: entries.isEmpty || locked
                       ? null
                       : () => setState(() {
                             _selectedChatIds
@@ -552,10 +932,16 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                   child: const Text('Выбрать все', style: TextStyle(fontSize: 12)),
                 ),
                 TextButton(
-                  onPressed: _selectedChatIds.isEmpty || _joining
+                  onPressed: _selectedChatIds.isEmpty || locked
                       ? null
                       : () => setState(() => _selectedChatIds.clear()),
                   child: const Text('Сбросить', style: TextStyle(fontSize: 12)),
+                ),
+                TextButton(
+                  onPressed: _selectedChatIds.isEmpty || locked || _selectedMotherId == null
+                      ? null
+                      : () => _clearJoinedMarks(state),
+                  child: const Text('Сбросить учёт', style: TextStyle(fontSize: 12)),
                 ),
                 const Spacer(),
                 Text(
@@ -591,7 +977,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                       return CheckboxListTile(
                         dense: true,
                         value: selected,
-                        onChanged: _joining
+                        onChanged: locked
                             ? null
                             : (v) => setState(() {
                                   if (v == true) {
@@ -641,9 +1027,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                     contentPadding: EdgeInsets.zero,
                     dense: true,
                     value: _inviteById,
-                    onChanged: _joining
-                        ? null
-                        : (v) => setState(() => _inviteById = v ?? false),
+                    onChanged: locked ? null : (v) => setState(() => _inviteById = v ?? false),
                     title: const Text(
                       'По ID (матка войдёт и пригласит)',
                       style: TextStyle(fontSize: 13),
@@ -660,7 +1044,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                     children: [
                       Expanded(
                         child: FilledButton.icon(
-                          onPressed: _joining || _selectedMotherId == null
+                          onPressed: locked || _selectedMotherId == null
                               ? null
                               : () => _joinChildren(
                                     state,
@@ -698,19 +1082,41 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                         child: OutlinedButton(
                           onPressed: _selectedChatIds.isEmpty ||
                                   _selectedMotherId == null ||
-                                  _joining
+                                  locked
                               ? null
                               : () => _assign(state, clear: false),
-                          child: const Text('Назначить матке'),
+                          child: const Text('Назначить'),
                         ),
                       ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: OutlinedButton(
-                          onPressed: _selectedChatIds.isEmpty || _joining
+                          onPressed: _selectedChatIds.isEmpty || locked
                               ? null
                               : () => _assign(state, clear: true),
-                          child: const Text('Снять с матки'),
+                          child: const Text('Снять'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: _selectedChatIds.isEmpty ||
+                                  _selectedMotherId == null ||
+                                  locked
+                              ? null
+                              : () => _verifySelected(state),
+                          child: const Text('Проверить'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: _selectedChatIds.isEmpty ||
+                                  _selectedMotherId == null ||
+                                  locked
+                              ? null
+                              : () => _leaveSelected(state),
+                          child: const Text('Выйти'),
                         ),
                       ),
                     ],

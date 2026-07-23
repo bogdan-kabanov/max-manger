@@ -148,7 +148,7 @@ class _TokenAccountDialogState extends State<TokenAccountDialog> {
       setState(() {
         _loading = false;
         _error = result.error ??
-            'MAX не принял токен. Нужен свежий токен An_… из web.max.ru';
+            'Токен MAX отклонён. Скопируйте свежий An_… из web.max.ru.';
       });
       return;
     }
