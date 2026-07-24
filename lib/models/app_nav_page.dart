@@ -1,16 +1,22 @@
-/// Left-rail destinations. Pipeline first, then accounts, then «Ещё».
+/// Left-rail destinations. Accounts first (separated), then pipeline, then «Ещё».
 enum AppNavPage {
+  /// Accounts table + profile templates (top of rail, above pipeline).
+  accounts,
+  /// Groups catalog under Accounts: parse, paste links, assign to parents.
+  catalogGroups,
+  /// Campaigns: who sends, templates, launch, history.
+  campaigns,
+  /// Channel creation funnels (top rail with accounts/groups/campaigns).
+  funnels,
   /// 1. Parse channels into catalog.
   parse,
   /// 2. Soft-assign catalog groups to matkas.
   assign,
   /// 3. Message templates + matka bindings.
   templates,
-  /// 4. Channel creation funnels.
-  funnels,
-  /// 5. Distribute & join children by invite links.
+  /// 4. Distribute & join children by invite links.
   launch,
-  /// 6. Pipeline journal + live actions.
+  /// 5. Pipeline journal + live actions.
   journal,
   profiles,
   addAccount,
@@ -28,16 +34,26 @@ enum AppNavPage {
   /// Account map lives only on the home page («Профили»).
   bool get showsAccountMap => this == profiles;
 
+  /// Work page that should fill the whole nav content area (no width cap).
+  bool get isFullBleedPage =>
+      this == accounts ||
+      this == catalogGroups ||
+      this == campaigns ||
+      this == funnels;
+
   bool get isPipelineStep =>
       this == parse ||
       this == assign ||
       this == templates ||
-      this == funnels ||
       this == launch ||
       this == journal;
 
   bool get isWideWorkPage =>
       isPipelineStep ||
+      this == accounts ||
+      this == catalogGroups ||
+      this == campaigns ||
+      this == funnels ||
       this == groups ||
       this == chats ||
       this == mother ||

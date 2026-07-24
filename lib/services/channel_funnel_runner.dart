@@ -293,6 +293,7 @@ class ChannelFunnelRunner {
           );
 
           if (i < targets.length - 1 && funnel.accountGapMs > 0) {
+            onLog('[Воронка] пауза ${funnel.accountGapMs}мс…');
             await delayUnlessCancelled(
               Duration(milliseconds: funnel.accountGapMs),
               token: cancel,
@@ -389,6 +390,7 @@ class ChannelFunnelRunner {
       );
 
       if (i < targets.length - 1 && funnel.accountGapMs > 0) {
+        onLog('[Воронка] пауза ${funnel.accountGapMs}мс…');
         await delayUnlessCancelled(
           Duration(milliseconds: funnel.accountGapMs),
           token: cancel,
@@ -608,6 +610,7 @@ class ChannelFunnelRunner {
       );
 
       if (i < targets.length - 1 && funnel.accountGapMs > 0) {
+        onLog('[Воронка] пауза ${funnel.accountGapMs}мс…');
         await delayUnlessCancelled(
           Duration(milliseconds: funnel.accountGapMs),
           token: cancel,

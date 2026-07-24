@@ -204,6 +204,30 @@ class MaxAuthService {
         if (proxy != null && proxy.trim().isNotEmpty) 'proxy': proxy.trim(),
       });
 
+  /// Push name / about / avatar to MAX (opcode 16).
+  static Future<MaxAuthResult> updateProfile({
+    required String token,
+    String? proxy,
+    String? firstName,
+    String? lastName,
+    String? description,
+    String? photoPath,
+    bool includeFirstName = true,
+    bool includeLastName = true,
+    bool includeDescription = true,
+  }) {
+    final args = <String, dynamic>{
+      'token': token,
+      if (proxy != null && proxy.trim().isNotEmpty) 'proxy': proxy.trim(),
+    };
+    if (includeFirstName) args['firstName'] = firstName?.trim() ?? '';
+    if (includeLastName) args['lastName'] = lastName?.trim() ?? '';
+    if (includeDescription) args['description'] = description ?? '';
+    final photo = photoPath?.trim();
+    if (photo != null && photo.isNotEmpty) args['photoPath'] = photo;
+    return _run('update-profile', args);
+  }
+
   static bool isNetworkError(String? error) {
     if (error == null) return false;
     final lower = error.toLowerCase();

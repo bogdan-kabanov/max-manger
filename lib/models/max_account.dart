@@ -56,6 +56,7 @@ class MaxAccount {
     this.firstName,
     this.lastName,
     this.description,
+    this.profilePhotoPath,
     this.apiToken,
     this.viewerId,
     this.authMethod = MaxAuthMethod.qr,
@@ -75,6 +76,9 @@ class MaxAccount {
   final String? firstName;
   final String? lastName;
   final String? description;
+
+  /// Absolute path to a local image used as MAX profile photo.
+  final String? profilePhotoPath;
   final String? apiToken;
   final int? viewerId;
   final MaxAuthMethod authMethod;
@@ -109,6 +113,9 @@ class MaxAccount {
   String get webDeviceId =>
       isolation.deviceId ?? const Uuid().v5(Uuid.NAMESPACE_URL, 'max-desktop-device:$id');
 
+  bool get hasProfilePhoto =>
+      profilePhotoPath != null && profilePhotoPath!.trim().isNotEmpty;
+
   MaxAccount copyWith({
     String? label,
     AccountIsolation? isolation,
@@ -118,6 +125,7 @@ class MaxAccount {
     String? firstName,
     String? lastName,
     String? description,
+    String? profilePhotoPath,
     String? apiToken,
     int? viewerId,
     MaxAuthMethod? authMethod,
@@ -125,6 +133,10 @@ class MaxAccount {
     AccountHealthStatus? healthStatus,
     String? lastError,
     bool clearLastError = false,
+    bool clearFirstName = false,
+    bool clearLastName = false,
+    bool clearDescription = false,
+    bool clearProfilePhoto = false,
     DateTime? lastCheckedAt,
   }) {
     return MaxAccount(
@@ -135,9 +147,11 @@ class MaxAccount {
       lastOpenedAt: lastOpenedAt ?? this.lastOpenedAt,
       notes: notes ?? this.notes,
       phone: phone ?? this.phone,
-      firstName: firstName ?? this.firstName,
-      lastName: lastName ?? this.lastName,
-      description: description ?? this.description,
+      firstName: clearFirstName ? null : (firstName ?? this.firstName),
+      lastName: clearLastName ? null : (lastName ?? this.lastName),
+      description: clearDescription ? null : (description ?? this.description),
+      profilePhotoPath:
+          clearProfilePhoto ? null : (profilePhotoPath ?? this.profilePhotoPath),
       apiToken: apiToken ?? this.apiToken,
       viewerId: viewerId ?? this.viewerId,
       authMethod: authMethod ?? this.authMethod,
@@ -159,6 +173,7 @@ class MaxAccount {
         if (firstName != null) 'firstName': firstName,
         if (lastName != null) 'lastName': lastName,
         if (description != null) 'description': description,
+        if (profilePhotoPath != null) 'profilePhotoPath': profilePhotoPath,
         if (apiToken != null) 'apiToken': apiToken,
         if (viewerId != null) 'viewerId': viewerId,
         'authMethod': authMethod.name,
@@ -186,6 +201,7 @@ class MaxAccount {
       firstName: json['firstName'] as String?,
       lastName: json['lastName'] as String?,
       description: json['description'] as String?,
+      profilePhotoPath: json['profilePhotoPath'] as String?,
       apiToken: json['apiToken'] as String?,
       viewerId: (json['viewerId'] as num?)?.toInt(),
       authMethod: authRaw == 'sms'

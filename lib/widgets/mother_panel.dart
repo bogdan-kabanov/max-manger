@@ -1620,7 +1620,8 @@ class _MotherPanelState extends State<MotherPanel> {
             Text('Скорость', style: theme.textTheme.titleSmall?.copyWith(fontSize: 12)),
             const SizedBox(height: 4),
             Text(
-              'Пауза между шагами матки: вступление в группы, приглашение дочерних, пересылка.',
+              'Первый шаг сразу, пауза только между следующими '
+              '(вступление, приглашение дочек, пересылка).',
               style: theme.textTheme.bodySmall?.copyWith(fontSize: 10, color: theme.hintColor),
             ),
             const SizedBox(height: 8),
@@ -1633,7 +1634,7 @@ class _MotherPanelState extends State<MotherPanel> {
                     keyboardType: const TextInputType.numberWithOptions(decimal: true),
                     style: const TextStyle(fontSize: 12),
                     decoration: const InputDecoration(
-                      labelText: 'Пауза между приглашениями (сек)',
+                      labelText: 'КД между шагами (сек), 1-й сразу',
                       isDense: true,
                       border: OutlineInputBorder(),
                     ),
@@ -2470,39 +2471,57 @@ class _MotherPanelState extends State<MotherPanel> {
         const SizedBox(height: 12),
         Text('Отдельные шаги', style: Theme.of(context).textTheme.labelLarge?.copyWith(fontSize: 12)),
         const SizedBox(height: 6),
-        Wrap(
-          spacing: 6,
-          runSpacing: 6,
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             OutlinedButton(
               onPressed: _running || !_cliReady || !motherHasToken || _childIds.isEmpty
                   ? null
                   : () => _runMode(_MotherMode.forwardAndJoin),
-              child: const Text('Переслать и вступить', style: TextStyle(fontSize: 11)),
+              child: const Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Переслать и вступить', style: TextStyle(fontSize: 12)),
+              ),
             ),
+            const SizedBox(height: 4),
             OutlinedButton(
               onPressed: _running || !_cliReady || !motherHasToken || _childIds.isEmpty
                   ? null
                   : () => _runMode(_MotherMode.forwardOnly),
-              child: const Text('Только переслать', style: TextStyle(fontSize: 11)),
+              child: const Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Только переслать', style: TextStyle(fontSize: 12)),
+              ),
             ),
+            const SizedBox(height: 4),
             OutlinedButton(
               onPressed: _running || !_cliReady || !motherHasToken
                   ? null
                   : () => _runMode(_MotherMode.inviteOnly),
-              child: const Text('По ID (админ)', style: TextStyle(fontSize: 11)),
+              child: const Align(
+                alignment: Alignment.centerLeft,
+                child: Text('По ID (админ)', style: TextStyle(fontSize: 12)),
+              ),
             ),
+            const SizedBox(height: 4),
             OutlinedButton(
               onPressed: _running || !_cliReady || _childIds.isEmpty
                   ? null
                   : () => _runMode(_MotherMode.childrenJoinOnly),
-              child: const Text('Дочерние по ссылкам', style: TextStyle(fontSize: 11)),
+              child: const Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Дочерние по ссылкам', style: TextStyle(fontSize: 12)),
+              ),
             ),
+            const SizedBox(height: 4),
             OutlinedButton(
               onPressed: _running || !_cliReady || !motherHasToken
                   ? null
                   : () => _runMode(_MotherMode.motherJoin),
-              child: const Text('Вступить + шаблон', style: TextStyle(fontSize: 11)),
+              child: const Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Вступить + шаблон', style: TextStyle(fontSize: 12)),
+              ),
             ),
           ],
         ),

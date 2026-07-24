@@ -210,7 +210,13 @@ async function cmdLoginToken(token, proxy) {
   const client = new MaxClient();
   try {
     await client.connect();
-    const response = await client.loginByToken(token);
+    let response;
+    try {
+      response = await client.loginByToken(token);
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      fail(mapMaxAuthError({ error: raw, message: raw }, raw), { code: raw });
+    }
     const payload = response.payload ?? {};
     if (payload.error) fail(mapMaxAuthError(payload), { code: payload.error });
 
@@ -224,6 +230,13 @@ async function cmdLoginToken(token, proxy) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Pause only BETWEEN steps — first action starts immediately. */
+async function sleepBetweenSteps(index, total, delayMs) {
+  if (index >= total - 1) return;
+  const ms = Number(delayMs) || 0;
+  if (ms > 0) await sleep(ms);
 }
 
 function parseJoinHash(linkOrHash) {
@@ -260,7 +273,14 @@ async function connectWithToken(token, proxy = undefined) {
     });
     const client = new MaxClient();
     await client.connect();
-    const response = await client.loginByToken(token);
+    let response;
+    try {
+      response = await client.loginByToken(token);
+    } catch (error) {
+      await client.disconnect().catch(() => undefined);
+      const raw = error instanceof Error ? error.message : String(error);
+      fail(mapMaxAuthError({ error: raw, message: raw }, raw), { code: raw });
+    }
     const payload = response.payload ?? {};
     progress('[API] loginByToken ответ', 'debug', summarizeRpc(response));
     if (payload.error) {
@@ -1207,7 +1227,7 @@ async function runInviteUsersToGroups(client, token, channels, userIds, delayMs,
         error: outcome.error,
       });
     }
-    if (i < channels.length - 1) await sleep(delayMs);
+    await sleepBetweenSteps(i, channels.length, delayMs);
   }
 }
 
@@ -1463,9 +1483,9 @@ async function deliverChildrenHybrid(client, token, {
     const channel = allChannels[i];
     for (let j = 0; j < targets.length; j++) {
       await deliverChildCascade(client, token, channel, targets[j], delayMs, results, progress);
-      if (j < targets.length - 1) await sleep(delayMs);
+      await sleepBetweenSteps(j, targets.length, delayMs);
     }
-    if (i < allChannels.length - 1) await sleep(delayMs);
+    await sleepBetweenSteps(i, allChannels.length, delayMs);
   }
 
   const linkHashes = sanitizeHashes(plan.linkChannels.map((c) => c.hash));
@@ -1632,7 +1652,7 @@ async function runChildrenJoin(hashes, childTokenList, delayMs, results, progres
           });
           progress(`[Дочерний ${c + 1}] ✗ ${hash.slice(0, 12)}…: ${message}`);
         }
-        if (i < joinHashes.length - 1) await sleep(delayMs);
+        await sleepBetweenSteps(i, joinHashes.length, delayMs);
       }
     } catch (error) {
       const message = error instanceof Error
@@ -2191,6 +2211,10 @@ async function cmdJoinGroups({ token, links, delayMs = 2500 }) {
   const results = [];
 
   try {
+    progress(
+      `Вступление: ${hashes.length} групп (1-я сразу` +
+        `${delayMs > 0 ? `, далее пауза ${Math.round(delayMs / 1000)}с` : ''})`,
+    );
     for (let i = 0; i < hashes.length; i++) {
       const hash = hashes[i];
       progress(`Вступление ${i + 1}/${hashes.length}: ${hash.slice(0, 12)}…`);
@@ -2209,7 +2233,7 @@ async function cmdJoinGroups({ token, links, delayMs = 2500 }) {
           error: error instanceof Error ? error.message : String(error),
         });
       }
-      if (i < hashes.length - 1) await sleep(delayMs);
+      await sleepBetweenSteps(i, hashes.length, delayMs);
     }
   } finally {
     await client.disconnect().catch(() => undefined);
@@ -2534,6 +2558,7 @@ async function cmdInviteChildren({
       }
     }
 
+    // Resolve is cheap prep — don't burn the invite CD here (first invite must start ASAP).
     for (let i = 0; i < hashes.length; i++) {
       const hash = hashes[i];
       progress(`[Приглашение] поиск группы ${i + 1}/${hashes.length}`);
@@ -2559,14 +2584,15 @@ async function cmdInviteChildren({
           error: message,
         });
       }
-      if (i < hashes.length - 1) await sleep(delayMs);
+      await sleepBetweenSteps(i, hashes.length, 150);
     }
 
     if (resolvedGroups.length === 0) {
       fail('Не удалось найти группы для приглашения');
     }
 
-    progress(`[Приглашение] каскад: inviteUsers → ссылка в ЛС → вступление дочки`, 'info', {
+    progress(`[Приглашение] каскад: 1-е сразу` +
+      `${delayMs > 0 ? `, далее пауза ${Math.round(delayMs / 1000)}с` : ''}`, 'info', {
       groups: resolvedGroups.length,
       inviteUserIds: userIds,
       childTargets: (childTargets ?? []).length,
@@ -2953,6 +2979,74 @@ async function applyChannelPhoto(client, chatId, photoPath) {
   return true;
 }
 
+/** Opcode 16 PROFILE / CHANGE_PROFILE — name, about, avatar. */
+const OPCODE_PROFILE_UPDATE = 16;
+
+/**
+ * Push user profile fields to MAX (name / about / avatar).
+ * Args: { token, firstName?, lastName?, description?, photoPath?, proxy? }
+ */
+async function cmdUpdateProfile(args) {
+  const token = String(args.token ?? '').trim();
+  if (!token) fail('Укажите токен');
+
+  const hasFirst = Object.prototype.hasOwnProperty.call(args, 'firstName');
+  const hasLast = Object.prototype.hasOwnProperty.call(args, 'lastName');
+  const hasDesc = Object.prototype.hasOwnProperty.call(args, 'description');
+  const firstName = hasFirst ? String(args.firstName ?? '').trim() : '';
+  const lastName = hasLast ? String(args.lastName ?? '').trim() : '';
+  const description = hasDesc ? String(args.description ?? '') : null;
+  const photoPath = asString(args.photoPath);
+
+  if (!hasFirst && !hasLast && !hasDesc && !photoPath) {
+    fail('Укажите имя, описание или фото профиля');
+  }
+
+  const { client } = await connectWithToken(token, args.proxy);
+  try {
+    const patch = {};
+    if (hasFirst || hasLast || photoPath) {
+      // Avatar updates expect name fields; text-only name updates too.
+      patch.firstName = firstName;
+      patch.lastName = lastName;
+    }
+    if (hasDesc) {
+      patch.description = description;
+    }
+
+    let avatarApplied = false;
+    if (photoPath) {
+      progress(`[Профиль] загрузка фото: ${photoPath}`, 'info');
+      const { photoToken } = await uploadPhotoToken(client, photoPath);
+      patch.photoToken = photoToken;
+      patch.avatarType = 'USER_AVATAR';
+      avatarApplied = true;
+    }
+
+    progress('[Профиль] PROFILE_UPDATE (op 16)…', 'info', {
+      firstName: patch.firstName,
+      lastName: patch.lastName,
+      hasDescription: patch.description != null,
+      hasAvatar: !!patch.photoToken,
+    });
+
+    const response = await client.invokeMethod(OPCODE_PROFILE_UPDATE, patch);
+    assertRpcOk(response, 'PROFILE');
+    let profile = extractProfile(response.payload ?? response);
+    profile = await enrichProfileFromContacts(client, profile);
+
+    ok({
+      token,
+      profile,
+      nameApplied: patch.firstName != null || patch.lastName != null,
+      descriptionApplied: patch.description != null,
+      avatarApplied,
+    });
+  } finally {
+    await client.disconnect().catch(() => undefined);
+  }
+}
+
 async function sendChannelPost(client, chatId, text, mediaPath) {
   const id = normalizeChatId(chatId);
   const body = String(text ?? '').trim();
@@ -3087,7 +3181,9 @@ async function cmdSendChatMessages(args) {
       }
       const delayMs = Number(row.delayMs ?? 600);
       if (i < messages.length - 1 && delayMs > 0) {
-        await sleep(Math.min(Math.max(0, delayMs), 60000));
+        const waitMs = Math.min(Math.max(0, delayMs), 60000);
+        progress(`[Письмо] пауза ${waitMs}мс…`);
+        await sleep(waitMs);
       }
     }
     ok({ sent, total: messages.length, results });
@@ -3669,6 +3765,7 @@ const MOTHER_COMMANDS = new Set([
   'delete-chat-messages',
   'list-chat-messages',
   'forward-chat-messages',
+  'update-profile',
 ]);
 
 try {
@@ -3758,6 +3855,10 @@ try {
     case 'forward-chat-messages':
       await cmdForwardChatMessages(args);
       break;
+    case 'update-profile':
+      if (!args.token) fail('Укажите токен');
+      await cmdUpdateProfile(args);
+      break;
     default:
       fail('Неизвестная команда');
   }
@@ -3769,5 +3870,14 @@ try {
       { code: 'network.error' },
     );
   }
-  fail(message);
+  const authMapped = mapMaxAuthError(
+    {
+      error: message,
+      message,
+      localizedMessage: error?.localizedMessage ?? error?.title,
+      title: error?.title,
+    },
+    message,
+  );
+  fail(authMapped, { code: message });
 }

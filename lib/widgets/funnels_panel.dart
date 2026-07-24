@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../models/account_map_state.dart';
@@ -678,8 +679,88 @@ class _FunnelsPanelState extends State<FunnelsPanel> {
 
     final summary = await state.runChannelFunnel(funnelId);
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(summary.message), duration: const Duration(seconds: 5)),
+
+    final invites = <({String account, String? title, String url})>[];
+    for (final a in state.accounts) {
+      final p = state.channelPolicyFor(a.id);
+      if (!p.funnelIds.contains(funnelId)) continue;
+      final url = p.lastCreatedInviteUrl?.trim();
+      if (url == null || url.isEmpty) continue;
+      invites.add((
+        account: a.profileDisplayName,
+        title: p.lastCreatedTitle,
+        url: url,
+      ));
+    }
+
+    if (invites.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(summary.message), duration: const Duration(seconds: 5)),
+      );
+      return;
+    }
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Воронка · ссылки каналов'),
+        content: SizedBox(
+          width: 480,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(summary.message, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+              const SizedBox(height: 12),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 320),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: invites.length,
+                  separatorBuilder: (_, __) => const Divider(height: 12),
+                  itemBuilder: (_, i) {
+                    final row = invites[i];
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          row.account,
+                          style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                        ),
+                        if (row.title != null && row.title!.trim().isNotEmpty)
+                          Text(
+                            row.title!,
+                            style: const TextStyle(fontSize: 11, color: Colors.white54),
+                          ),
+                        const SizedBox(height: 4),
+                        _InviteLinkRow(url: row.url),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              final text = invites.map((e) => '${e.account}\t${e.url}').join('\n');
+              await Clipboard.setData(ClipboardData(text: text));
+              if (ctx.mounted) {
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                  const SnackBar(content: Text('Все ссылки скопированы')),
+                );
+              }
+            },
+            child: const Text('Копировать все'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Закрыть'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -773,6 +854,7 @@ class _FunnelsPanelState extends State<FunnelsPanel> {
                         final chatId = policy.lastCreatedChatId?.trim();
                         final hasChat = chatId != null && chatId.isNotEmpty;
                         final title = policy.lastCreatedTitle?.trim();
+                        final invite = policy.lastCreatedInviteUrl?.trim();
                         return CheckboxListTile(
                           dense: true,
                           value: selectedIds.contains(account.id),
@@ -791,13 +873,16 @@ class _FunnelsPanelState extends State<FunnelsPanel> {
                           ),
                           subtitle: Text(
                             hasChat
-                                ? (title?.isNotEmpty == true
-                                    ? '$title · $chatId'
-                                    : 'канал $chatId')
+                                ? [
+                                    if (title?.isNotEmpty == true) title!,
+                                    'id $chatId',
+                                    if (invite != null && invite.isNotEmpty) invite,
+                                  ].join('\n')
                                 : 'нет созданного канала — сначала запустите воронку',
                             style: TextStyle(
                               fontSize: 10,
                               color: hasChat ? Colors.white60 : Colors.orangeAccent,
+                              height: 1.3,
                             ),
                           ),
                         );
@@ -1195,6 +1280,62 @@ class _SimpleActionCard extends StatelessWidget {
   }
 }
 
+class _InviteLinkRow extends StatelessWidget {
+  const _InviteLinkRow({required this.url, this.dense = false});
+
+  final String url;
+  final bool dense;
+
+  Future<void> _copy(BuildContext context) async {
+    await Clipboard.setData(ClipboardData(text: url));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Ссылка скопирована'),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Material(
+      color: scheme.surfaceContainerHighest.withValues(alpha: 0.45),
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(10, dense ? 6 : 8, 4, dense ? 6 : 8),
+        child: Row(
+          children: [
+            Icon(Icons.link, size: dense ? 14 : 16, color: scheme.primary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: SelectableText(
+                url,
+                style: TextStyle(
+                  fontSize: dense ? 11 : 12,
+                  color: scheme.primary,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: () => _copy(context),
+              icon: const Icon(Icons.copy, size: 16),
+              label: const Text('Копировать'),
+              style: FilledButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                textStyle: const TextStyle(fontSize: 12),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _FunnelCreatorsCard extends StatelessWidget {
   const _FunnelCreatorsCard({
     required this.state,
@@ -1226,8 +1367,7 @@ class _FunnelCreatorsCard extends StatelessWidget {
             Text(
               creators.isEmpty
                   ? 'Никого нет — вкладка «Аккаунты»: включите «создавать каналы» и воронку.'
-                  : 'В MAX у аккаунта канал появится только после успешного «Создание канала». '
-                      'Закрытый id из прошлых запусков — не канал.',
+                  : 'После создания канала здесь появится пригласительная ссылка max.ru/join/…',
               style: const TextStyle(fontSize: 11, color: Colors.white54, height: 1.35),
             ),
             if (creators.isNotEmpty) ...[
@@ -1238,52 +1378,94 @@ class _FunnelCreatorsCard extends StatelessWidget {
                     final policy = state.channelPolicyFor(account.id);
                     final chatId = policy.lastCreatedChatId;
                     final title = policy.lastCreatedTitle;
-                    final invite = policy.lastCreatedInviteUrl;
+                    final invite = policy.lastCreatedInviteUrl?.trim();
                     final hasStored = chatId != null;
+                    final hasInvite = invite != null && invite.isNotEmpty;
                     return Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  account.profileDisplayName,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                    fontSize: 12,
-                                  ),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      account.profileDisplayName,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      hasStored
+                                          ? '${title != null && title.isNotEmpty ? title : 'Канал'} · id $chatId'
+                                          : 'канала ещё нет — запустите воронку',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        color: hasStored
+                                            ? Colors.white70
+                                            : Colors.white54,
+                                        height: 1.3,
+                                      ),
+                                    ),
+                                  ],
                                 ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  hasStored
-                                      ? 'сохранён id $chatId'
-                                          '${title != null && title.isNotEmpty ? ' · $title' : ''}'
-                                          '${invite != null && invite.isNotEmpty ? '\n$invite' : ''}'
-                                          '\n(если в MAX пусто — id мёртвый, жмите Сбросить)'
-                                      : 'канала ещё нет — запустите воронку',
-                                  style: TextStyle(
-                                    fontSize: 10,
-                                    color: hasStored
-                                        ? Colors.orangeAccent.withValues(alpha: 0.9)
-                                        : Colors.white54,
-                                    height: 1.3,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                          if (hasStored)
-                            TextButton(
-                              onPressed: () => state.clearAccountCreatedChannel(account.id),
-                              style: TextButton.styleFrom(
-                                visualDensity: VisualDensity.compact,
-                                padding: const EdgeInsets.symmetric(horizontal: 8),
                               ),
-                              child: const Text('Сбросить', style: TextStyle(fontSize: 11)),
+                              if (hasStored)
+                                TextButton(
+                                  onPressed: () =>
+                                      state.clearAccountCreatedChannel(account.id),
+                                  style: TextButton.styleFrom(
+                                    visualDensity: VisualDensity.compact,
+                                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                                  ),
+                                  child: const Text('Сбросить', style: TextStyle(fontSize: 11)),
+                                ),
+                            ],
+                          ),
+                          if (hasInvite) ...[
+                            const SizedBox(height: 6),
+                            const Text(
+                              'Пригласительная ссылка',
+                              style: TextStyle(fontSize: 10, color: Colors.white54),
                             ),
+                            const SizedBox(height: 4),
+                            _InviteLinkRow(url: invite, dense: true),
+                          ] else if (hasStored) ...[
+                            const SizedBox(height: 6),
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: TextButton.icon(
+                                onPressed: () async {
+                                  final url = await state.ensureChannelInviteUrl(account);
+                                  if (!context.mounted) return;
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        url != null && url.isNotEmpty
+                                            ? 'Ссылка получена — можно копировать'
+                                            : 'Не удалось получить ссылку',
+                                      ),
+                                    ),
+                                  );
+                                },
+                                icon: const Icon(Icons.refresh, size: 14),
+                                label: const Text(
+                                  'Получить ссылку',
+                                  style: TextStyle(fontSize: 11),
+                                ),
+                                style: TextButton.styleFrom(
+                                  visualDensity: VisualDensity.compact,
+                                  padding: EdgeInsets.zero,
+                                ),
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     );
@@ -1439,7 +1621,7 @@ class _AccountsTab extends StatelessWidget {
           ),
         Text(
           'Включите «создавать каналы» и отметьте воронки для каждого аккаунта. '
-          'Кнопка у матки применяет выбранную воронку ко всему кластеру.',
+          'Кнопка у родителя применяет выбранную воронку ко всему кластеру.',
           style: Theme.of(context).textTheme.bodySmall?.copyWith(fontSize: 11, color: Colors.white60),
         ),
         const SizedBox(height: 12),
@@ -1454,7 +1636,7 @@ class _AccountsTab extends StatelessWidget {
               state.accountById(cluster.motherAccountId!) != null)
             _AccountPolicyTile(
               account: state.accountById(cluster.motherAccountId!)!,
-              roleLabel: 'матка',
+              roleLabel: 'родитель',
               funnels: funnels,
               policy: state.channelPolicyFor(cluster.motherAccountId!),
             ),
@@ -1478,7 +1660,7 @@ class _AccountsTab extends StatelessWidget {
         ],
         if (unassigned.isNotEmpty) ...[
           const Text(
-            'Без матки',
+            'Без родителя',
             style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
           ),
           const SizedBox(height: 6),
@@ -1636,6 +1818,16 @@ class _AccountPolicyTile extends StatelessWidget {
                   ),
                 ],
               ),
+              if (policy.lastCreatedInviteUrl != null &&
+                  policy.lastCreatedInviteUrl!.trim().isNotEmpty) ...[
+                const SizedBox(height: 6),
+                const Text(
+                  'Пригласительная ссылка',
+                  style: TextStyle(fontSize: 10, color: Colors.white54),
+                ),
+                const SizedBox(height: 4),
+                _InviteLinkRow(url: policy.lastCreatedInviteUrl!.trim(), dense: true),
+              ],
             ],
           ],
         ),

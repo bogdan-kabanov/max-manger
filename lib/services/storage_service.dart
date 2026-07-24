@@ -17,6 +17,7 @@ import '../models/max_account.dart';
 import '../models/max_channel_catalog_entry.dart';
 import '../models/mother_group_channel.dart';
 import '../models/pipeline_journal_event.dart';
+import '../models/profile_template.dart';
 import '../models/rate_settings.dart';
 import '../models/template_sent_record.dart';
 
@@ -50,6 +51,9 @@ class StorageService {
   List<JoinMessageTemplate> joinMessageTemplates = [];
   /// accountId → join message template id.
   final Map<String, String> joinTemplateByAccountId = {};
+  List<ProfileTemplate> profileTemplates = [];
+  /// accountId → profile template id (last applied).
+  final Map<String, String> profileTemplateByAccountId = {};
   /// Matka-level template bindings (onJoin / dailyAt).
   List<MatkaTemplateBinding> matkaTemplateBindings = [];
   /// Structured pipeline journal (newest first, capped).
@@ -183,6 +187,8 @@ class StorageService {
       channelPoliciesByAccountId.clear();
       joinMessageTemplates = [];
       joinTemplateByAccountId.clear();
+      profileTemplates = [];
+      profileTemplateByAccountId.clear();
       matkaTemplateBindings = [];
       pipelineJournal = [];
       accountGroupMemberships.clear();
@@ -266,6 +272,18 @@ class StorageService {
       final templateId = entry.value?.toString().trim() ?? '';
       if (entry.key.isEmpty || templateId.isEmpty) continue;
       joinTemplateByAccountId[entry.key] = templateId;
+    }
+    profileTemplates = (data['profileTemplates'] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .map(ProfileTemplate.fromJson)
+        .toList();
+    profileTemplateByAccountId.clear();
+    final rawProfileAssign =
+        data['profileTemplateByAccountId'] as Map<String, dynamic>? ?? {};
+    for (final entry in rawProfileAssign.entries) {
+      final templateId = entry.value?.toString().trim() ?? '';
+      if (entry.key.isEmpty || templateId.isEmpty) continue;
+      profileTemplateByAccountId[entry.key] = templateId;
     }
     matkaTemplateBindings = (data['matkaTemplateBindings'] as List<dynamic>? ?? const [])
         .whereType<Map<String, dynamic>>()
@@ -411,6 +429,8 @@ class StorageService {
       'channelPolicies': channelPoliciesByAccountId.values.map((p) => p.toJson()).toList(),
       'joinMessageTemplates': joinMessageTemplates.map((t) => t.toJson()).toList(),
       'joinTemplateByAccountId': joinTemplateByAccountId,
+      'profileTemplates': profileTemplates.map((t) => t.toJson()).toList(),
+      'profileTemplateByAccountId': profileTemplateByAccountId,
       'matkaTemplateBindings': matkaTemplateBindings.map((b) => b.toJson()).toList(),
       'pipelineJournal': pipelineJournal.map((e) => e.toJson()).toList(),
       'accountGroupMemberships':
@@ -468,6 +488,27 @@ class StorageService {
           ..addAll(assignments);
       });
 
+  Future<void> saveProfileTemplates(List<ProfileTemplate> templates) =>
+      _mutate(() async {
+        profileTemplates = templates;
+      });
+
+  Future<void> saveProfileTemplateAssignments(Map<String, String> assignments) =>
+      _mutate(() async {
+        profileTemplateByAccountId
+          ..clear()
+          ..addAll(assignments);
+      });
+
+  ProfileTemplate? profileTemplateForAccount(String accountId) {
+    final id = profileTemplateByAccountId[accountId];
+    if (id == null || id.isEmpty) return null;
+    for (final t in profileTemplates) {
+      if (t.id == id) return t;
+    }
+    return null;
+  }
+
   List<AccountGroupMembership> membershipsFor(String accountId) {
     return accountGroupMemberships.values
         .where((m) => m.accountId == accountId)
@@ -518,7 +559,8 @@ class StorageService {
       });
 
   /// Replace expected memberships for [accountId] with what list-groups returned
-  /// among [expectedChatIds] (or all listed groups if expected is null).
+  /// among [expectedChatIds]. When [expectedChatIds] is null — full replace:
+  /// keep only chats present in [listed].
   Future<void> syncMembershipsFromListedGroups({
     required String accountId,
     required List<MotherGroupChannel> listed,
@@ -530,14 +572,24 @@ class StorageService {
           for (final g in listed)
             if (g.chatId.isNotEmpty) g.chatId: g,
         };
-        final expected = expectedChatIds ?? listedById.keys.toSet();
+        final expected = expectedChatIds;
 
-        // Drop expected chats that are no longer present.
-        accountGroupMemberships.removeWhere(
-          (_, m) => m.accountId == accountId && expected.contains(m.chatId) && !listedById.containsKey(m.chatId),
-        );
+        if (expected == null) {
+          // Full refresh: drop any membership no longer returned by list-groups.
+          accountGroupMemberships.removeWhere(
+            (_, m) => m.accountId == accountId && !listedById.containsKey(m.chatId),
+          );
+        } else {
+          accountGroupMemberships.removeWhere(
+            (_, m) =>
+                m.accountId == accountId &&
+                expected.contains(m.chatId) &&
+                !listedById.containsKey(m.chatId),
+          );
+        }
 
-        for (final chatId in expected) {
+        final toUpsert = expected ?? listedById.keys.toSet();
+        for (final chatId in toUpsert) {
           final g = listedById[chatId];
           if (g == null) continue;
           final key = '$accountId::$chatId';
@@ -649,6 +701,7 @@ class StorageService {
       motherGroupsByAccountId.remove(id);
       channelPoliciesByAccountId.remove(id);
       joinTemplateByAccountId.remove(id);
+      profileTemplateByAccountId.remove(id);
       matkaTemplateBindings =
           matkaTemplateBindings.where((b) => b.motherAccountId != id).toList();
       channelCatalog = [

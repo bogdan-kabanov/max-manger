@@ -173,7 +173,7 @@ class MapFlowGraphBuilder {
       strokeWidth: 3.5,
       selectedStrokeWidth: 4.5,
       style: ConnectionStyles.smoothstep,
-      label: ConnectionLabel.center(text: 'матка'),
+      label: ConnectionLabel.center(text: 'родитель'),
       endPoint: ConnectionEndPoint.triangle,
     );
   }

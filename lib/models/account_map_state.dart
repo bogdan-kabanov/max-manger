@@ -95,12 +95,36 @@ class AccountMapActivity {
 }
 
 /// One mother account with its own set of child accounts.
+enum ClusterSendMode {
+  /// Parent account writes (solo clusters always use this).
+  parent,
+  /// Child accounts write.
+  children;
+
+  String get label => switch (this) {
+        ClusterSendMode.parent => 'Родитель сам',
+        ClusterSendMode.children => 'Дочерние',
+      };
+
+  static ClusterSendMode fromJson(Object? raw, {required bool hasChildren}) {
+    final s = raw?.toString().trim().toLowerCase();
+    if (s == 'parent' || s == 'mother' || s == 'solo') {
+      return ClusterSendMode.parent;
+    }
+    if (s == 'children' || s == 'child') {
+      return ClusterSendMode.children;
+    }
+    return hasChildren ? ClusterSendMode.children : ClusterSendMode.parent;
+  }
+}
+
 class MotherCluster {
   const MotherCluster({
     required this.id,
     required this.name,
     this.motherAccountId,
     this.childAccountIds = const {},
+    this.sendMode = ClusterSendMode.children,
     this.postJoinWriteEnabled = false,
     this.postJoinMessages = const [],
     this.postJoinDelayMs = 5000,
@@ -111,6 +135,10 @@ class MotherCluster {
   final String? motherAccountId;
   final Set<String> childAccountIds;
 
+  /// Who sends templates for groups of this parent.
+  /// When [childAccountIds] is empty, effective mode is always [ClusterSendMode.parent].
+  final ClusterSendMode sendMode;
+
   /// After children join a chat, send [postJoinMessages] via API (not web clicker).
   final bool postJoinWriteEnabled;
   final List<BroadcastMessageStep> postJoinMessages;
@@ -118,6 +146,12 @@ class MotherCluster {
   final int postJoinDelayMs;
 
   int get childCount => childAccountIds.length;
+
+  bool get isSolo => childAccountIds.isEmpty;
+
+  /// Resolved writer mode (solo always parent).
+  ClusterSendMode get effectiveSendMode =>
+      isSolo ? ClusterSendMode.parent : sendMode;
 
   bool get hasPostJoinMessages =>
       postJoinWriteEnabled && postJoinMessages.any((m) => m.text.trim().isNotEmpty);
@@ -127,6 +161,7 @@ class MotherCluster {
     String? motherAccountId,
     Set<String>? childAccountIds,
     bool clearMother = false,
+    ClusterSendMode? sendMode,
     bool? postJoinWriteEnabled,
     List<BroadcastMessageStep>? postJoinMessages,
     int? postJoinDelayMs,
@@ -136,6 +171,7 @@ class MotherCluster {
       name: name ?? this.name,
       motherAccountId: clearMother ? null : (motherAccountId ?? this.motherAccountId),
       childAccountIds: childAccountIds ?? this.childAccountIds,
+      sendMode: sendMode ?? this.sendMode,
       postJoinWriteEnabled: postJoinWriteEnabled ?? this.postJoinWriteEnabled,
       postJoinMessages: postJoinMessages ?? this.postJoinMessages,
       postJoinDelayMs: postJoinDelayMs ?? this.postJoinDelayMs,
@@ -147,21 +183,27 @@ class MotherCluster {
         'name': name,
         if (motherAccountId != null) 'motherAccountId': motherAccountId,
         'childAccountIds': childAccountIds.toList(),
+        'sendMode': sendMode.name,
         'postJoinWriteEnabled': postJoinWriteEnabled,
         'postJoinMessages': postJoinMessages.map((m) => m.toJson()).toList(),
         'postJoinDelayMs': postJoinDelayMs,
       };
 
   factory MotherCluster.fromJson(Map<String, dynamic> json) {
+    final children = (json['childAccountIds'] as List<dynamic>? ?? [])
+        .map((e) => e.toString())
+        .toSet();
     return MotherCluster(
       id: (json['id'] as String?) ?? const Uuid().v4(),
       name: (json['name'] as String?)?.trim().isNotEmpty == true
           ? (json['name'] as String).trim()
-          : 'Матка',
+          : 'Родитель',
       motherAccountId: json['motherAccountId'] as String?,
-      childAccountIds: (json['childAccountIds'] as List<dynamic>? ?? [])
-          .map((e) => e.toString())
-          .toSet(),
+      childAccountIds: children,
+      sendMode: ClusterSendMode.fromJson(
+        json['sendMode'],
+        hasChildren: children.isNotEmpty,
+      ),
       postJoinWriteEnabled: json['postJoinWriteEnabled'] == true,
       postJoinMessages: (json['postJoinMessages'] as List<dynamic>? ?? const [])
           .whereType<Map<String, dynamic>>()
@@ -172,11 +214,13 @@ class MotherCluster {
   }
 
   static MotherCluster create({String? name, String? motherAccountId, Set<String>? childAccountIds}) {
+    final kids = childAccountIds ?? const <String>{};
     return MotherCluster(
       id: const Uuid().v4(),
-      name: name ?? 'Матка',
+      name: name ?? 'Родитель',
       motherAccountId: motherAccountId,
-      childAccountIds: childAccountIds ?? const {},
+      childAccountIds: kids,
+      sendMode: kids.isEmpty ? ClusterSendMode.parent : ClusterSendMode.children,
     );
   }
 }
@@ -282,7 +326,7 @@ class AccountMapState {
         clusters = [
           MotherCluster(
             id: const Uuid().v4(),
-            name: 'Матка 1',
+            name: 'Родитель 1',
             motherAccountId: legacyMother,
             childAccountIds: legacyChildren,
           ),

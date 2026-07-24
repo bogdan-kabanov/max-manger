@@ -432,7 +432,7 @@ class _ChannelCatalogPanelState extends State<ChannelCatalogPanel> {
         .where((row) => _selectedMotherAccountIds.contains(row.mother.id))
         .toList();
     if (mothers.isEmpty) {
-      _log('Отметьте матки, куда вступать', level: 'warn');
+      _log('Отметьте родителей, куда вступать', level: 'warn');
       return;
     }
 
@@ -954,7 +954,7 @@ class _ChannelCatalogPanelState extends State<ChannelCatalogPanel> {
                 : () => context.read<AppState>().setNavPage(AppNavPage.assign),
             icon: const Icon(Icons.bookmark_add_outlined, size: 18),
             label: const Text(
-              'Дальше: Раздача маткам',
+              'Дальше: Раздача родителям',
               style: TextStyle(fontSize: 12),
             ),
           ),

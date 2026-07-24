@@ -138,10 +138,13 @@ class PipelineGroupPlanner {
     }
 
     if (slots.isEmpty) {
-      return const PipelineLaunchPlan(
-        slots: [],
-        motherSummaries: [],
-        error: 'Нет назначенных групп со свободными дочками (с токеном)',
+      final hasSolo = clusters.any((c) => c.childAccountIds.isEmpty && c.motherAccountId != null);
+      return PipelineLaunchPlan(
+        slots: const [],
+        motherSummaries: const [],
+        error: hasSolo
+            ? 'Нет групп для вступления (назначьте родителю или уже всё вступили)'
+            : 'Нет назначенных групп со свободными дочками (с токеном)',
       );
     }
 

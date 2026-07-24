@@ -164,6 +164,7 @@ class BroadcastWorkflowRunner {
                 ? step.delayAfterMs
                 : messageDelayFloor;
             if (delay > 0) {
+              onLog('[Рассылка] пауза ${delay}мс…');
               await delayUnlessCancelled(
                 Duration(milliseconds: delay),
                 token: cancel,
@@ -172,6 +173,7 @@ class BroadcastWorkflowRunner {
           }
         }
         if (cfg.targetChats.length > 1 && chatGapMs > 0) {
+          onLog('[Рассылка] пауза между чатами ${chatGapMs}мс…');
           await delayUnlessCancelled(
             Duration(milliseconds: chatGapMs),
             token: cancel,

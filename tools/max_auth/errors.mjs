@@ -7,6 +7,10 @@ const MESSAGES = {
     + 'затем войдите через QR в «Профиль + QR».',
   'service.unavailable': 'Сервис MAX временно недоступен. Попробуйте позже.',
   'session.invalid.state': 'Ошибка сессии MAX. Запросите код заново.',
+  'login.token':
+    'Токен сессии протух (FAIL_LOGIN_TOKEN). Откройте аккаунт → войдите заново через QR/web.max.ru и обновите токен.',
+  FAIL_LOGIN_TOKEN:
+    'Токен сессии протух (FAIL_LOGIN_TOKEN). Откройте аккаунт → войдите заново через QR/web.max.ru и обновите токен.',
   no_token: 'MAX не отправил SMS-код через API.',
 };
 

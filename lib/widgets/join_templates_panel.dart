@@ -16,6 +16,23 @@ import '../services/desktop_file_picker.dart';
 import 'post_forward_panel.dart';
 import 'template_channels_panel.dart';
 
+/// Opens the multi-message chat editor (text, photo, pause between messages).
+Future<JoinMessageTemplate?> showJoinTemplateMessagesEditor(
+  BuildContext context,
+  JoinMessageTemplate template,
+) async {
+  final result = await showDialog<_TemplateMessagesEditResult>(
+    context: context,
+    builder: (ctx) => _TemplateChatEditorDialog(template: template),
+  );
+  if (result == null) return null;
+  return template.copyWith(
+    messages: result.messages,
+    delayMs: result.delayMs,
+    enabled: result.enabled,
+  );
+}
+
 /// Unified place to create post-join message templates and assign them to accounts.
 class JoinTemplatesPanel extends StatefulWidget {
   const JoinTemplatesPanel({super.key});
@@ -116,18 +133,9 @@ class _JoinTemplatesPanelState extends State<JoinTemplatesPanel> {
   }
 
   Future<void> _editMessages(JoinMessageTemplate template) async {
-    final result = await showDialog<_TemplateMessagesEditResult>(
-      context: context,
-      builder: (ctx) => _TemplateChatEditorDialog(template: template),
-    );
-    if (result == null || !mounted) return;
-    await context.read<AppState>().updateJoinMessageTemplate(
-          template.copyWith(
-            messages: result.messages,
-            delayMs: result.delayMs,
-            enabled: result.enabled,
-          ),
-        );
+    final updated = await showJoinTemplateMessagesEditor(context, template);
+    if (updated == null || !mounted) return;
+    await context.read<AppState>().updateJoinMessageTemplate(updated);
   }
 
   Future<void> _applyToSelectedAccounts() async {
@@ -209,7 +217,7 @@ class _JoinTemplatesPanelState extends State<JoinTemplatesPanel> {
         const SnackBar(
           content: Text(
             'Нет аккаунтов с токеном: назначьте шаблон аккаунту '
-            '(в т.ч. одиночной матке) и проверьте API-токен',
+            '(в т.ч. одиночному родителю) и проверьте API-токен',
           ),
         ),
       );
@@ -256,8 +264,8 @@ class _JoinTemplatesPanelState extends State<JoinTemplatesPanel> {
                       ),
                     const SizedBox(height: 4),
                     Text(
-                      'Выборочно по аккаунтам: отметьте дочек в списке слева/ниже '
-                      'перед запуском. Матки не пишут.',
+                      'Выборочно: отметьте аккаунты в списке перед запуском. '
+                      'Кто пишет — настраивается в «Рассылка → Кто шлёт».',
                       style: TextStyle(
                         fontSize: 11,
                         color: Theme.of(ctx).colorScheme.onSurfaceVariant,
@@ -731,8 +739,8 @@ class _AccountsTab extends StatelessWidget {
                   const Padding(
                     padding: EdgeInsets.fromLTRB(8, 0, 8, 8),
                     child: Text(
-                      'Дочек нет — соло: шаблон назначается на сам аккаунт кластера. '
-                      'Добавить дочек можно при создании кластера во вкладке «Раздача».',
+                      'Дочерних нет — шаблон на сам родительский аккаунт. '
+                      'Добавить дочерние можно во вкладке «Аккаунты».',
                       style: TextStyle(fontSize: 11, color: Colors.white54),
                     ),
                   ),
@@ -740,7 +748,7 @@ class _AccountsTab extends StatelessWidget {
               ],
               if (unassigned.isNotEmpty) ...[
                 const Text(
-                  'Без матки',
+                  'Без родителя',
                   style: TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
                 ),
                 const SizedBox(height: 6),

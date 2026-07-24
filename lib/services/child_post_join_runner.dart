@@ -250,8 +250,14 @@ class ChildPostJoinRunner {
           proxy: child.isolation.proxyServer,
           cancel: cancel,
           onProgress: (msg) {
-            if (msg.contains('✓') || msg.contains('✗') || msg.startsWith('⚠')) {
-              onLog(msg, level: msg.contains('✗') || msg.startsWith('⚠') ? 'warn' : 'info');
+            if (msg.contains('пауза') ||
+                msg.contains('✓') ||
+                msg.contains('✗') ||
+                msg.startsWith('⚠')) {
+              onLog(
+                msg,
+                level: msg.contains('✗') || msg.startsWith('⚠') ? 'warn' : 'info',
+              );
             }
           },
         );

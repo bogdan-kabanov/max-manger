@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
@@ -20,8 +21,10 @@ import '../models/max_account.dart';
 import '../models/max_channel_catalog_entry.dart';
 import '../models/mother_group_channel.dart';
 import '../models/pipeline_journal_event.dart';
+import '../models/profile_template.dart';
 import '../models/rate_settings.dart';
 import '../models/template_send_scope.dart';
+import '../models/template_sent_record.dart';
 import '../services/browser_session_manager.dart';
 import '../services/ai_chat_service.dart';
 import '../services/emulator_macro_runner.dart';
@@ -61,10 +64,13 @@ class AppState extends ChangeNotifier {
   bool funnelRunning = false;
   final List<ActiveAction> _activeActions = [];
   int _actionSeq = 0;
+  Timer? _actionWaitTicker;
 
   List<ActiveAction> get activeActions => List.unmodifiable(_activeActions);
   int get runningActionsCount =>
       _activeActions.where((a) => a.isActive).length;
+
+  ActiveAction? actionById(String id) => _actionById(id);
 
   ActiveAction beginAction({
     required ActiveActionKind kind,
@@ -78,6 +84,7 @@ class AppState extends ChangeNotifier {
       title: title,
       subtitle: subtitle,
     );
+    action.appendLog('Запущено');
     _activeActions.insert(0, action);
     notifyListeners();
     return action;
@@ -88,10 +95,16 @@ class AppState extends ChangeNotifier {
     String? message,
     int? done,
     int? total,
+    String level = 'info',
+    bool appendLog = true,
   }) {
     final action = _actionById(id);
     if (action == null || !action.isActive) return;
-    if (message != null) action.progressMessage = message;
+    if (message != null) {
+      action.progressMessage = message;
+      if (appendLog) action.appendLog(message, level: level);
+      _syncWaitFromMessage(action, message);
+    }
     if (done != null) action.done = done;
     if (total != null) action.total = total;
     notifyListeners();
@@ -111,12 +124,27 @@ class AppState extends ChangeNotifier {
             : ActiveActionStatus.completed);
     action.status = resolved;
     action.finishedAt = DateTime.now();
+    action.clearWait();
     if (message != null && message.isNotEmpty) {
       action.progressMessage = message;
+      action.appendLog(
+        message,
+        level: resolved == ActiveActionStatus.failed
+            ? 'error'
+            : resolved == ActiveActionStatus.cancelled
+                ? 'warn'
+                : 'info',
+      );
     } else if (resolved == ActiveActionStatus.cancelled &&
         action.progressMessage.isEmpty) {
       action.progressMessage = 'Остановлено';
+      action.appendLog('Остановлено', level: 'warn');
+    } else if (resolved == ActiveActionStatus.completed &&
+        (action.logs.isEmpty ||
+            !action.logs.last.message.toLowerCase().contains('готов'))) {
+      action.appendLog('Готово');
     }
+    _stopWaitTickerIfIdle();
     notifyListeners();
   }
 
@@ -125,7 +153,10 @@ class AppState extends ChangeNotifier {
     if (action == null || !action.isActive) return;
     action.status = ActiveActionStatus.cancelling;
     action.progressMessage = 'Остановка…';
+    action.clearWait();
+    action.appendLog('Остановка…', level: 'warn');
     action.cancelToken.cancel();
+    _stopWaitTickerIfIdle();
     notifyListeners();
     browser.logMessage('[Действия] Остановка: ${action.title}', level: 'warn');
   }
@@ -135,9 +166,12 @@ class AppState extends ChangeNotifier {
     for (final action in active) {
       action.status = ActiveActionStatus.cancelling;
       action.progressMessage = 'Остановка…';
+      action.clearWait();
+      action.appendLog('Остановка…', level: 'warn');
       action.cancelToken.cancel();
     }
     if (active.isNotEmpty) {
+      _stopWaitTickerIfIdle();
       notifyListeners();
       browser.logMessage(
         '[Действия] Остановка всех (${active.length})',
@@ -157,6 +191,71 @@ class AppState extends ChangeNotifier {
       if (a.id == id) return a;
     }
     return null;
+  }
+
+  static final _pauseMsRe = RegExp(r'(\d+)\s*мс', caseSensitive: false);
+  static final _leftSecRe = RegExp(r'осталось\s+(\d+)\s*с', caseSensitive: false);
+
+  void _syncWaitFromMessage(ActiveAction action, String message) {
+    final lower = message.toLowerCase();
+    final left = _leftSecRe.firstMatch(lower);
+    if (left != null) {
+      final sec = int.tryParse(left.group(1)!);
+      if (sec != null && sec >= 0) {
+        action.waitUntil = DateTime.now().add(Duration(seconds: sec));
+        action.waitLabel ??= message;
+        _ensureWaitTicker();
+        return;
+      }
+    }
+
+    final isPause = lower.contains('пауза') || lower.contains('ожидание');
+    if (isPause) {
+      final msMatch = _pauseMsRe.firstMatch(message);
+      if (msMatch != null) {
+        final ms = int.tryParse(msMatch.group(1)!);
+        if (ms != null && ms > 0) {
+          // Avoid restarting the same announced pause on duplicate log lines.
+          if (action.isWaiting && action.waitLabel == message) return;
+          action.beginWait(Duration(milliseconds: ms), label: message);
+          _ensureWaitTicker();
+          return;
+        }
+      }
+    }
+
+    if (action.waitUntil != null) {
+      action.clearWait();
+      _stopWaitTickerIfIdle();
+    }
+  }
+
+  void _ensureWaitTicker() {
+    if (_actionWaitTicker != null) return;
+    _actionWaitTicker = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      var anyWaiting = false;
+      for (final action in _activeActions) {
+        if (action.waitUntil == null) continue;
+        if (!action.isWaiting) {
+          action.clearWait();
+          continue;
+        }
+        anyWaiting = true;
+      }
+      if (!anyWaiting) {
+        _actionWaitTicker?.cancel();
+        _actionWaitTicker = null;
+      }
+      notifyListeners();
+    });
+  }
+
+  void _stopWaitTickerIfIdle() {
+    final anyWaiting = _activeActions.any((a) => a.isWaiting);
+    if (!anyWaiting) {
+      _actionWaitTicker?.cancel();
+      _actionWaitTicker = null;
+    }
   }
 
   MaxAccount? selectedAccount;
@@ -188,6 +287,9 @@ class AppState extends ChangeNotifier {
   List<JoinMessageTemplate> get joinMessageTemplates => storage.joinMessageTemplates;
   Map<String, String> get joinTemplateByAccountId =>
       Map.unmodifiable(storage.joinTemplateByAccountId);
+  List<ProfileTemplate> get profileTemplates => storage.profileTemplates;
+  Map<String, String> get profileTemplateByAccountId =>
+      Map.unmodifiable(storage.profileTemplateByAccountId);
 
   AccountChannelPolicy channelPolicyFor(String accountId) =>
       storage.channelPolicyFor(accountId);
@@ -195,9 +297,20 @@ class AppState extends ChangeNotifier {
   JoinMessageTemplate? joinTemplateForAccount(String accountId) =>
       storage.joinTemplateForAccount(accountId);
 
+  ProfileTemplate? profileTemplateForAccount(String accountId) =>
+      storage.profileTemplateForAccount(accountId);
+
   JoinMessageTemplate? joinMessageTemplateById(String? id) {
     if (id == null) return null;
     for (final t in joinMessageTemplates) {
+      if (t.id == id) return t;
+    }
+    return null;
+  }
+
+  ProfileTemplate? profileTemplateById(String? id) {
+    if (id == null) return null;
+    for (final t in profileTemplates) {
       if (t.id == id) return t;
     }
     return null;
@@ -400,14 +513,35 @@ class AppState extends ChangeNotifier {
     );
   }
 
-  /// Paste `https://max.ru/join/…` links into catalog and assign to [motherAccountId].
-  /// Returns counts: added / alreadyKnown / invalid.
-  Future<({int added, int alreadyKnown, int invalid})> importJoinLinksToMother({
-    required String motherAccountId,
+  Future<void> mergeChannelCatalogEntries(List<MaxChannelCatalogEntry> entries) async {
+    if (entries.isEmpty) return;
+    await storage.mergeChannelCatalog(entries);
+    notifyListeners();
+  }
+
+  Future<void> removeCatalogGroups(Iterable<String> chatIds) async {
+    final ids = chatIds.map((e) => e.trim()).where((e) => e.isNotEmpty).toSet();
+    if (ids.isEmpty) return;
+    await storage.saveChannelCatalog([
+      for (final e in channelCatalog)
+        if (!ids.contains(e.chatId)) e,
+    ]);
+    notifyListeners();
+  }
+
+  Future<void> clearChannelCatalog() async {
+    await storage.saveChannelCatalog(const []);
+    notifyListeners();
+  }
+
+  /// Paste `https://max.ru/join/…` links into catalog; optionally assign to a parent.
+  Future<({int added, int alreadyKnown, int invalid})> importJoinLinks({
     required String rawText,
+    String? motherAccountId,
   }) async {
-    final mother = accountById(motherAccountId);
-    if (mother == null) {
+    final motherId = motherAccountId?.trim();
+    final mother = (motherId != null && motherId.isNotEmpty) ? accountById(motherId) : null;
+    if (motherId != null && motherId.isNotEmpty && mother == null) {
       return (added: 0, alreadyKnown: 0, invalid: 0);
     }
 
@@ -427,7 +561,6 @@ class AppState extends ChangeNotifier {
       if (!MotherGroupChannel.isValidInviteHash(hash)) continue;
       if (knownHashes.contains(hash)) {
         alreadyKnown += 1;
-        // Still ensure assignment to this mother if free / other.
         continue;
       }
       knownHashes.add(hash);
@@ -439,19 +572,20 @@ class AppState extends ChangeNotifier {
           inviteHash: hash,
           source: 'paste',
           discoveredAt: DateTime.now(),
-          assignedMotherAccountId: motherAccountId,
+          assignedMotherAccountId: mother?.id,
         ),
       );
     }
 
-    // Re-assign existing catalog rows that match pasted hashes.
-    final reassignIds = <String>[
-      for (final e in channelCatalog)
-        if (e.hasInviteLink &&
-            hashes.contains(e.inviteHash) &&
-            e.assignedMotherAccountId != motherAccountId)
-          e.chatId,
-    ];
+    final reassignIds = mother == null
+        ? const <String>[]
+        : [
+            for (final e in channelCatalog)
+              if (e.hasInviteLink &&
+                  hashes.contains(e.inviteHash) &&
+                  e.assignedMotherAccountId != mother.id)
+                e.chatId,
+          ];
 
     if (incoming.isNotEmpty) {
       await storage.mergeChannelCatalog(incoming);
@@ -459,7 +593,7 @@ class AppState extends ChangeNotifier {
     if (reassignIds.isNotEmpty) {
       await storage.assignCatalogGroupsToMother(
         chatIds: reassignIds,
-        motherAccountId: motherAccountId,
+        motherAccountId: mother!.id,
       );
     }
 
@@ -468,26 +602,24 @@ class AppState extends ChangeNotifier {
     if (added > 0 || moved > 0) {
       await addPipelineJournal(
         kind: PipelineJournalKind.assign,
-        message:
-            'Матке «${mother.label}» импорт ссылок: +$added'
-            '${moved > 0 ? ', переназначено $moved' : ''}'
-            '${alreadyKnown > 0 ? ', уже были $alreadyKnown' : ''}',
-        motherAccountId: motherAccountId,
+        message: mother == null
+            ? 'Импорт ссылок в каталог: +$added'
+                '${alreadyKnown > 0 ? ', уже были $alreadyKnown' : ''}'
+            : 'Матке «${mother.label}» импорт ссылок: +$added'
+                '${moved > 0 ? ', переназначено $moved' : ''}'
+                '${alreadyKnown > 0 ? ', уже были $alreadyKnown' : ''}',
+        motherAccountId: mother?.id,
       );
       notifyListeners();
-    } else if (alreadyKnown > 0) {
-      // Ensure already-known free ones get assigned.
+    } else if (alreadyKnown > 0 && mother != null) {
       final freeKnown = [
         for (final e in channelCatalog)
-          if (e.hasInviteLink &&
-              hashes.contains(e.inviteHash) &&
-              !e.isAssigned)
-            e.chatId,
+          if (e.hasInviteLink && hashes.contains(e.inviteHash) && !e.isAssigned) e.chatId,
       ];
       if (freeKnown.isNotEmpty) {
         await assignCatalogGroupsToMother(
           chatIds: freeKnown,
-          motherAccountId: motherAccountId,
+          motherAccountId: mother.id,
         );
         return (
           added: freeKnown.length,
@@ -495,6 +627,8 @@ class AppState extends ChangeNotifier {
           invalid: 0,
         );
       }
+      notifyListeners();
+    } else if (added > 0 || alreadyKnown > 0) {
       notifyListeners();
     }
 
@@ -504,6 +638,13 @@ class AppState extends ChangeNotifier {
       invalid: 0,
     );
   }
+
+  /// Paste `https://max.ru/join/…` links into catalog and assign to [motherAccountId].
+  Future<({int added, int alreadyKnown, int invalid})> importJoinLinksToMother({
+    required String motherAccountId,
+    required String rawText,
+  }) =>
+      importJoinLinks(rawText: rawText, motherAccountId: motherAccountId);
 
   Future<MatkaTemplateBinding?> addMatkaTemplateBinding({
     required String motherAccountId,
@@ -549,7 +690,7 @@ class AppState extends ChangeNotifier {
   List<MatkaTemplateBinding> bindingsForMother(String motherAccountId) =>
       matkaTemplateBindings.where((b) => b.motherAccountId == motherAccountId).toList();
 
-  /// First enabled onJoin template for matka → assign to all her children.
+  /// First enabled onJoin template for matka → assign to workers (children or solo mother).
   Future<void> _syncOnJoinBindingsToChildren(String motherAccountId) async {
     final onJoin = bindingsForMother(motherAccountId)
         .where((b) => b.enabled && b.trigger == MatkaTemplateTrigger.onJoin)
@@ -558,15 +699,20 @@ class AppState extends ChangeNotifier {
           (c) => c?.motherAccountId == motherAccountId,
           orElse: () => null,
         );
-    if (cluster == null || cluster.childAccountIds.isEmpty) return;
+    if (cluster == null) return;
+    final targets = cluster.childAccountIds.isNotEmpty
+        ? cluster.childAccountIds
+        : {
+            if (cluster.motherAccountId != null) cluster.motherAccountId!,
+          };
+    if (targets.isEmpty) return;
     if (onJoin.isEmpty) {
-      await clearJoinTemplateForAccounts(cluster.childAccountIds);
+      await clearJoinTemplateForAccounts(targets);
       return;
     }
-    // One primary onJoin template per matka (first binding).
     await applyJoinTemplateToAccounts(
       templateId: onJoin.first.templateId,
-      accountIds: cluster.childAccountIds,
+      accountIds: targets,
     );
   }
 
@@ -907,6 +1053,36 @@ class AppState extends ChangeNotifier {
         cancel: cancel,
       );
 
+      if (cancel?.isCancelled == true) break;
+
+      // CLI died on login / empty response — don't pretend mother succeeded.
+      if (!joinResult.ok && joinResult.results.isEmpty) {
+        final msg = joinResult.message;
+        final tokenDead = RegExp(
+          r'login\.token|FAIL_LOGIN_TOKEN|авторизируйтесь|протух|Ошибка входа',
+          caseSensitive: false,
+        ).hasMatch(msg);
+        track(
+          tokenDead
+              ? '«${mother.label}»: токен протух — ${msg}. '
+                  'Войдите заново (QR / web.max.ru), потом повторите «Вступить / пригласить».'
+              : '«${mother.label}»: вступление не удалось — $msg. Приглашение пропущено.',
+        );
+        if (tokenDead) {
+          await addPipelineJournal(
+            kind: PipelineJournalKind.launchPlan,
+            message: '«${mother.label}»: токен протух, вход/приглашение остановлены',
+            motherAccountId: mother.id,
+            detail: msg,
+          );
+        }
+        mothersDone++;
+        if (actionId != null) {
+          updateActionProgress(actionId, done: mothersDone, total: byMother.length);
+        }
+        continue;
+      }
+
       await recordMembershipsFromJoinResults(
         motherAccountId: mother.id,
         children: const [],
@@ -1001,6 +1177,18 @@ class AppState extends ChangeNotifier {
         );
         invitedTotal += inviteResult.invited + inviteResult.joined;
 
+        if (!inviteResult.ok && inviteResult.results.isEmpty) {
+          track(
+            '«${slot.child.label}»: приглашение оборвалось — ${inviteResult.message}',
+          );
+        } else if (inviteResult.invited + inviteResult.joined == 0) {
+          track(
+            '«${slot.child.label}»: 0 приглашений'
+            '${inviteResult.message.isNotEmpty ? ' (${inviteResult.message})' : ''}'
+            '${inviteResult.failed > 0 ? ', ошибок: ${inviteResult.failed}' : ''}',
+          );
+        }
+
         await recordMembershipsFromJoinResults(
           motherAccountId: mother.id,
           children: [fresh],
@@ -1012,7 +1200,9 @@ class AppState extends ChangeNotifier {
         );
         await addPipelineJournal(
           kind: PipelineJournalKind.joinById,
-          message: '«${slot.child.label}»: приглашений ${inviteResult.invited}',
+          message: inviteResult.invited + inviteResult.joined > 0
+              ? '«${slot.child.label}»: приглашений ${inviteResult.invited}'
+              : '«${slot.child.label}»: приглашений 0 — ${inviteResult.message}',
           motherAccountId: mother.id,
           childAccountId: slot.child.id,
         );
@@ -1054,7 +1244,10 @@ class AppState extends ChangeNotifier {
 
     final message = cancel?.isCancelled == true
         ? 'Остановлено: маток $mothersDone, приглашений $invitedTotal'
-        : 'Готово (по ID): маток $mothersDone, приглашений $invitedTotal';
+        : invitedTotal > 0
+            ? 'Готово (по ID): маток $mothersDone, приглашений $invitedTotal'
+            : 'По ID без приглашений: маток $mothersDone'
+                '${rateSettings.motherJoinDelayMs >= 60000 ? ' · пауза ${rateSettings.motherJoinDelayMs ~/ 1000}с — на десятки групп это часы' : ''}';
     return (invited: invitedTotal, mothers: mothersDone, message: message);
   }
 
@@ -1249,6 +1442,194 @@ class AppState extends ChangeNotifier {
     await _persistJoinTemplateAssignments(assign);
   }
 
+  Future<void> _persistProfileTemplates(List<ProfileTemplate> templates) async {
+    await storage.saveProfileTemplates(templates);
+    notifyListeners();
+  }
+
+  Future<void> _persistProfileTemplateAssignments(Map<String, String> assignments) async {
+    await storage.saveProfileTemplateAssignments(assignments);
+    notifyListeners();
+  }
+
+  Future<ProfileTemplate> addProfileTemplate({String? name}) async {
+    final index = profileTemplates.length + 1;
+    final template = ProfileTemplate.create(name: name ?? 'Профиль $index');
+    await _persistProfileTemplates([...profileTemplates, template]);
+    return template;
+  }
+
+  Future<void> updateProfileTemplate(ProfileTemplate template) async {
+    final list =
+        profileTemplates.map((t) => t.id == template.id ? template : t).toList();
+    await _persistProfileTemplates(list);
+  }
+
+  Future<void> removeProfileTemplate(String templateId) async {
+    await _persistProfileTemplates(
+      profileTemplates.where((t) => t.id != templateId).toList(),
+    );
+    final assign = Map<String, String>.from(storage.profileTemplateByAccountId)
+      ..removeWhere((_, id) => id == templateId);
+    await _persistProfileTemplateAssignments(assign);
+  }
+
+  Future<void> setAccountProfileTemplate(String accountId, String? templateId) async {
+    final assign = Map<String, String>.from(storage.profileTemplateByAccountId);
+    if (templateId == null || templateId.isEmpty) {
+      assign.remove(accountId);
+    } else if (profileTemplateById(templateId) != null) {
+      assign[accountId] = templateId;
+    } else {
+      return;
+    }
+    await _persistProfileTemplateAssignments(assign);
+  }
+
+  /// Copy template fields onto accounts, then push to MAX when token exists.
+  Future<({int local, int pushed, int failed, List<String> errors})> applyProfileTemplateToAccounts({
+    required String templateId,
+    required Iterable<String> accountIds,
+  }) async {
+    final template = profileTemplateById(templateId);
+    if (template == null) {
+      return (local: 0, pushed: 0, failed: 0, errors: const <String>[]);
+    }
+
+    final ids = accountIds.toSet();
+    var local = 0;
+    var pushed = 0;
+    var failed = 0;
+    final errors = <String>[];
+    final assign = Map<String, String>.from(storage.profileTemplateByAccountId);
+
+    for (final account in List<MaxAccount>.from(storage.accounts)) {
+      if (!ids.contains(account.id)) continue;
+      final first = template.firstName?.trim() ?? '';
+      final last = template.lastName?.trim() ?? '';
+      final about = template.description?.trim() ?? '';
+      final photo = template.photoPath?.trim() ?? '';
+      // Only overwrite fields the template actually defines — keep the rest.
+      final updated = account.copyWith(
+        firstName: first.isNotEmpty ? first : null,
+        lastName: last.isNotEmpty ? last : null,
+        description: about.isNotEmpty ? about : null,
+        profilePhotoPath: photo.isNotEmpty ? photo : null,
+      );
+      await storage.updateAccount(updated);
+      if (selectedAccount?.id == account.id) {
+        selectedAccount = updated;
+      }
+      assign[account.id] = templateId;
+      local++;
+
+      if (!updated.hasApiSession) {
+        errors.add('${updated.label}: нет токена — только локально');
+        continue;
+      }
+      final result = await pushAccountProfileToMax(updated);
+      if (result.ok) {
+        pushed++;
+      } else {
+        failed++;
+        errors.add('${updated.label}: ${result.error ?? 'ошибка MAX'}');
+      }
+    }
+
+    await _persistProfileTemplateAssignments(assign);
+    return (local: local, pushed: pushed, failed: failed, errors: errors);
+  }
+
+  Future<void> clearProfileTemplateForAccounts(Iterable<String> accountIds) async {
+    final assign = Map<String, String>.from(storage.profileTemplateByAccountId);
+    for (final id in accountIds) {
+      assign.remove(id);
+    }
+    await _persistProfileTemplateAssignments(assign);
+  }
+
+  /// Persist local profile fields and optionally push them to MAX.
+  Future<MaxAuthResult?> updateAccountProfile({
+    required String accountId,
+    String? label,
+    String? firstName,
+    String? lastName,
+    String? description,
+    String? profilePhotoPath,
+    bool clearFirstName = false,
+    bool clearLastName = false,
+    bool clearDescription = false,
+    bool clearProfilePhoto = false,
+    String? profileTemplateId,
+    bool clearProfileTemplate = false,
+    bool pushToMax = true,
+  }) async {
+    final account = accountById(accountId);
+    if (account == null) return null;
+
+    final updated = account.copyWith(
+      label: label,
+      firstName: firstName,
+      lastName: lastName,
+      description: description,
+      profilePhotoPath: profilePhotoPath,
+      clearFirstName: clearFirstName,
+      clearLastName: clearLastName,
+      clearDescription: clearDescription,
+      clearProfilePhoto: clearProfilePhoto,
+    );
+    await storage.updateAccount(updated);
+    if (selectedAccount?.id == accountId) {
+      selectedAccount = updated;
+    }
+
+    if (clearProfileTemplate) {
+      await setAccountProfileTemplate(accountId, null);
+    } else if (profileTemplateId != null) {
+      await setAccountProfileTemplate(accountId, profileTemplateId);
+    } else {
+      notifyListeners();
+    }
+
+    if (!pushToMax) return null;
+    final fresh = accountById(accountId) ?? updated;
+    if (!fresh.hasApiSession) {
+      return MaxAuthResult(ok: false, error: 'Нет токена — сохранено только локально');
+    }
+    return pushAccountProfileToMax(fresh);
+  }
+
+  /// Push saved profile fields of [account] to MAX via opcode 16.
+  Future<MaxAuthResult> pushAccountProfileToMax(MaxAccount account) async {
+    if (!account.hasApiSession) {
+      return MaxAuthResult(ok: false, error: 'Нет токена сессии');
+    }
+    final photo = account.profilePhotoPath?.trim();
+    final result = await MaxAuthService.updateProfile(
+      token: account.apiToken!,
+      proxy: account.isolation.proxyServer,
+      firstName: account.firstName,
+      lastName: account.lastName,
+      description: account.description,
+      photoPath: (photo != null && photo.isNotEmpty && File(photo).existsSync())
+          ? photo
+          : null,
+    );
+    if (result.ok) {
+      final merged = _mergeProfileFields(account, result).copyWith(
+        healthStatus: AccountHealthStatus.ok,
+        clearLastError: true,
+        lastCheckedAt: DateTime.now(),
+      );
+      await storage.updateAccount(merged);
+      if (selectedAccount?.id == account.id) {
+        selectedAccount = merged;
+      }
+      notifyListeners();
+    }
+    return result;
+  }
+
   List<AccountGroupMembership> membershipsFor(String accountId) =>
       storage.membershipsFor(accountId);
 
@@ -1309,6 +1690,43 @@ class AppState extends ChangeNotifier {
       expectedChatIds: expectedChatIds,
     );
     notifyListeners();
+  }
+
+  /// Pull all chats the account is in via list-groups and replace local memberships.
+  Future<MotherGroupsResult> refreshAccountMemberships(
+    String accountId, {
+    bool scanMessages = false,
+    MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
+  }) async {
+    final account = accountById(accountId);
+    if (account == null) {
+      return MotherGroupsResult(ok: false, message: 'Аккаунт не найден');
+    }
+    if (!account.hasApiSession) {
+      return MotherGroupsResult(ok: false, message: 'Нет токена сессии');
+    }
+
+    await ensureViewerId(account);
+    final fresh = accountById(accountId) ?? account;
+    final result = await MaxMotherService.listMotherGroups(
+      token: fresh.apiToken!,
+      scanMessages: scanMessages,
+      proxy: fresh.isolation.proxyServer,
+      onProgress: onProgress,
+      cancel: cancel,
+    );
+    if (!result.ok) return result;
+
+    await syncMembershipsFromListedGroups(
+      accountId: accountId,
+      listed: result.groups,
+    );
+    return MotherGroupsResult(
+      ok: true,
+      message: 'Групп: ${result.groups.length}',
+      groups: result.groups,
+    );
   }
 
   /// Record joins from mother CLI result rows.
@@ -1490,28 +1908,114 @@ class AppState extends ChangeNotifier {
 
   bool templateBroadcastRunning = false;
 
-  /// Account ids that should write [templateId]: direct child assignments +
-  /// children of matkas with this template bound. Mothers are never included.
+  /// Account ids that should write [templateId].
+  /// Includes children with the template, and parents when cluster send mode is parent/solo.
   Set<String> joinTemplateWriterAccountIds(String templateId) {
     final mothers = accountMap.allMotherAccountIds;
     final ids = <String>{};
+
     for (final entry in storage.joinTemplateByAccountId.entries) {
       if (entry.value != templateId) continue;
-      if (mothers.contains(entry.key)) continue;
-      ids.add(entry.key);
+      final accountId = entry.key;
+      if (mothers.contains(accountId)) {
+        final cluster = accountMap.clusterForMother(accountId);
+        if (cluster == null) continue;
+        if (cluster.effectiveSendMode == ClusterSendMode.parent) {
+          ids.add(accountId);
+        }
+        continue;
+      }
+      ids.add(accountId);
     }
+
+    // Solo / parent-mode clusters: mother must write even if assignment lagged.
+    for (final cluster in motherClusters) {
+      if (cluster.effectiveSendMode != ClusterSendMode.parent) continue;
+      final mid = cluster.motherAccountId;
+      if (mid == null) continue;
+      final assigned = storage.joinTemplateByAccountId[mid];
+      if (assigned == templateId) {
+        ids.add(mid);
+        continue;
+      }
+      // Binding to mother also counts.
+      final bound = matkaTemplateBindings.any(
+        (b) => b.enabled && b.templateId == templateId && b.motherAccountId == mid,
+      );
+      if (bound) ids.add(mid);
+    }
+
     for (final binding in matkaTemplateBindings) {
       if (binding.templateId != templateId || !binding.enabled) continue;
       final cluster = accountMap.clusterForMother(binding.motherAccountId);
       if (cluster == null) continue;
-      for (final childId in cluster.childAccountIds) {
-        if (!mothers.contains(childId)) ids.add(childId);
+      if (cluster.effectiveSendMode == ClusterSendMode.parent) {
+        final mid = cluster.motherAccountId;
+        if (mid != null) ids.add(mid);
+      } else {
+        for (final childId in cluster.childAccountIds) {
+          if (!mothers.contains(childId)) ids.add(childId);
+        }
       }
     }
     return ids;
   }
 
-  /// Send [template] into every group each eligible (non-mother) account is in.
+  /// Configure who sends for a parent cluster and assign [templateId] in one step.
+  Future<void> applyClusterCampaignConfig({
+    required String clusterId,
+    required ClusterSendMode sendMode,
+    String? templateId,
+  }) async {
+    final cluster = motherClusters.cast<MotherCluster?>().firstWhere(
+          (c) => c?.id == clusterId,
+          orElse: () => null,
+        );
+    if (cluster == null) return;
+
+    final mode = cluster.isSolo ? ClusterSendMode.parent : sendMode;
+    await updateMotherCluster(cluster.copyWith(sendMode: mode));
+
+    final mid = cluster.motherAccountId;
+    if (mid == null) return;
+
+    final writers = <String>{
+      if (mode == ClusterSendMode.parent) mid,
+      if (mode == ClusterSendMode.children) ...cluster.childAccountIds,
+    };
+    final clearIds = <String>{
+      mid,
+      ...cluster.childAccountIds,
+    };
+
+    await clearJoinTemplateForAccounts(clearIds);
+    if (templateId != null &&
+        templateId.isNotEmpty &&
+        joinMessageTemplateById(templateId) != null &&
+        writers.isNotEmpty) {
+      await applyJoinTemplateToAccounts(
+        templateId: templateId,
+        accountIds: writers,
+      );
+    }
+  }
+
+  List<TemplateSentRecord> templateSentHistory({
+    String? templateId,
+    String? accountId,
+  }) {
+    final list = storage.templateSentRecordsFor(
+      templateId: templateId,
+      accountId: accountId,
+    )..sort((a, b) {
+        final at = a.sentAt?.millisecondsSinceEpoch ?? 0;
+        final bt = b.sentAt?.millisecondsSinceEpoch ?? 0;
+        return bt.compareTo(at);
+      });
+    return list;
+  }
+
+  /// Send [template] into every group each eligible account is in.
   /// Optionally limit to [onlyAccountIds]. Reloads groups via list-groups when possible.
   Future<int> broadcastTemplateToExistingGroups({
     required String templateId,
@@ -1533,7 +2037,9 @@ class AppState extends ChangeNotifier {
     var accountIds = joinTemplateWriterAccountIds(templateId);
     final filter = onlyAccountIds?.toSet();
     if (filter != null && filter.isNotEmpty) {
-      accountIds = accountIds.intersection(filter);
+      final narrowed = accountIds.intersection(filter);
+      // Explicit UI selection (e.g. solo parent) must not be wiped if assignment lagged.
+      accountIds = narrowed.isNotEmpty ? narrowed : filter;
     }
 
     final targetAccounts = accounts
@@ -1546,8 +2052,8 @@ class AppState extends ChangeNotifier {
         .toList();
     if (targetAccounts.isEmpty) {
       browser.logMessage(
-        '[Шаблон] нет дочерних/аккаунтов с токеном для «${template.name}» '
-        '(матки никогда не пишут)',
+        '[Шаблон] нет аккаунтов с токеном для «${template.name}» '
+        '(проверьте «Кто шлёт» и назначение шаблона)',
         level: 'warn',
       );
       return 0;
@@ -1561,7 +2067,7 @@ class AppState extends ChangeNotifier {
       subtitle: '«${template.name}» · ${targetAccounts.length} акк. · ${scope.title}',
     );
     browser.logMessage(
-      '[Шаблон] «${template.name}» → ${targetAccounts.length} доч./акк. '
+      '[Шаблон] «${template.name}» → ${targetAccounts.length} акк. '
       '(${scope.title})…',
     );
 
@@ -2500,7 +3006,7 @@ class AppState extends ChangeNotifier {
   Future<MotherCluster> addMotherCluster({String? name, String? motherAccountId}) async {
     final index = accountMap.motherClusters.length + 1;
     final cluster = MotherCluster.create(
-      name: name ?? 'Матка $index',
+      name: name ?? 'Родитель $index',
       motherAccountId: motherAccountId,
     );
     await _persistMotherClusters([...accountMap.motherClusters, cluster]);
@@ -3694,6 +4200,8 @@ class AppState extends ChangeNotifier {
   @override
   void dispose() {
     cancelAllActions();
+    _actionWaitTicker?.cancel();
+    _actionWaitTicker = null;
     _mapActivityTimer?.cancel();
     _dailyTemplateTimer?.cancel();
     _scheduler.dispose();

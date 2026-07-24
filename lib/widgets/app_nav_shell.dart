@@ -21,6 +21,9 @@ import 'join_templates_panel.dart';
 import 'pipeline_assign_panel.dart';
 import 'pipeline_journal_panel.dart';
 import 'pipeline_launch_panel.dart';
+import 'accounts_panel.dart';
+import 'campaigns_panel.dart';
+import 'groups_panel.dart';
 import 'registration_guide_dialog.dart';
 import 'sms_account_dialog.dart';
 import 'token_account_dialog.dart';
@@ -54,12 +57,12 @@ class AppNavShell extends StatefulWidget {
 }
 
 class _AppNavShellState extends State<AppNavShell> {
-  /// Primary rail destinations (index → page). Secondary pages open from «Ещё».
+  /// Pipeline + secondary primary destinations. «Аккаунты» lives in [leading]
+  /// above a divider so it stays visually separate at the top.
   static const _railPages = <AppNavPage>[
     AppNavPage.parse,
     AppNavPage.assign,
     AppNavPage.templates,
-    AppNavPage.funnels,
     AppNavPage.launch,
     AppNavPage.journal,
     AppNavPage.profiles,
@@ -67,7 +70,14 @@ class _AppNavShellState extends State<AppNavShell> {
     AppNavPage.more,
   ];
 
-  int _railIndexFor(AppNavPage page) {
+  int? _railIndexFor(AppNavPage page) {
+    // Top-rail buttons live in [leading], not destinations.
+    if (page == AppNavPage.accounts ||
+        page == AppNavPage.catalogGroups ||
+        page == AppNavPage.campaigns ||
+        page == AppNavPage.funnels) {
+      return null;
+    }
     final i = _railPages.indexOf(page);
     if (i >= 0) return i;
     // Secondary tools highlight «Ещё».
@@ -116,9 +126,12 @@ class _AppNavShellState extends State<AppNavShell> {
               AppNavPage.funnels => const _FunnelsPage(),
               AppNavPage.launch => const _LaunchPage(),
               AppNavPage.journal => const _JournalPage(),
+              AppNavPage.accounts => const _AccountsPage(),
+              AppNavPage.catalogGroups => const _CatalogGroupsPage(),
+              AppNavPage.campaigns => const _CampaignsPage(),
               AppNavPage.profiles => const _ProfilesPage(),
               AppNavPage.addAccount => _AddAccountPage(
-                  onCreated: () => context.read<AppState>().setNavPage(AppNavPage.profiles),
+                  onCreated: () => context.read<AppState>().setNavPage(AppNavPage.accounts),
                 ),
               AppNavPage.more => const _MorePage(),
               AppNavPage.groups => const _GroupsPage(),
@@ -158,7 +171,61 @@ class _AppNavShellState extends State<AppNavShell> {
                 backgroundColor: scheme.surfaceContainerHighest.withValues(alpha: 0.35),
                 leading: Padding(
                   padding: EdgeInsets.only(top: 12, bottom: extended ? 8 : 4),
-                  child: _BrandMark(compact: !extended),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _BrandMark(compact: !extended),
+                      const SizedBox(height: 16),
+                      _TopRailButton(
+                        extended: extended,
+                        selected: page == AppNavPage.accounts,
+                        label: 'Аккаунты',
+                        icon: Icons.manage_accounts_outlined,
+                        selectedIcon: Icons.manage_accounts,
+                        onTap: () =>
+                            context.read<AppState>().setNavPage(AppNavPage.accounts),
+                      ),
+                      const SizedBox(height: 4),
+                      _TopRailButton(
+                        extended: extended,
+                        selected: page == AppNavPage.catalogGroups,
+                        label: 'Группы',
+                        icon: Icons.groups_outlined,
+                        selectedIcon: Icons.groups,
+                        onTap: () => context
+                            .read<AppState>()
+                            .setNavPage(AppNavPage.catalogGroups),
+                      ),
+                      const SizedBox(height: 4),
+                      _TopRailButton(
+                        extended: extended,
+                        selected: page == AppNavPage.campaigns,
+                        label: 'Рассылка',
+                        icon: Icons.campaign_outlined,
+                        selectedIcon: Icons.campaign,
+                        onTap: () =>
+                            context.read<AppState>().setNavPage(AppNavPage.campaigns),
+                      ),
+                      const SizedBox(height: 4),
+                      _TopRailButton(
+                        extended: extended,
+                        selected: page == AppNavPage.funnels,
+                        label: 'Воронки',
+                        icon: Icons.filter_alt_outlined,
+                        selectedIcon: Icons.filter_alt,
+                        onTap: () =>
+                            context.read<AppState>().setNavPage(AppNavPage.funnels),
+                      ),
+                      const SizedBox(height: 10),
+                      Divider(
+                        height: 1,
+                        thickness: 1,
+                        indent: extended ? 4 : 8,
+                        endIndent: extended ? 4 : 8,
+                        color: Theme.of(context).dividerColor,
+                      ),
+                    ],
+                  ),
                 ),
                 destinations: [
                   const NavigationRailDestination(
@@ -175,11 +242,6 @@ class _AppNavShellState extends State<AppNavShell> {
                     icon: Icon(Icons.description_outlined),
                     selectedIcon: Icon(Icons.description),
                     label: Text('Шаблоны'),
-                  ),
-                  const NavigationRailDestination(
-                    icon: Icon(Icons.filter_alt_outlined),
-                    selectedIcon: Icon(Icons.filter_alt),
-                    label: Text('Воронки'),
                   ),
                   const NavigationRailDestination(
                     icon: Icon(Icons.play_circle_outline),
@@ -219,13 +281,15 @@ class _AppNavShellState extends State<AppNavShell> {
               VerticalDivider(width: 1, color: Theme.of(context).dividerColor),
               if (widget.expandContent)
                 Expanded(
-                  child: Align(
-                    alignment: Alignment.topLeft,
-                    child: SizedBox(
-                      width: contentWidth,
-                      child: pageBody,
-                    ),
-                  ),
+                  child: page.isFullBleedPage
+                      ? pageBody
+                      : Align(
+                          alignment: Alignment.topLeft,
+                          child: SizedBox(
+                            width: contentWidth,
+                            child: pageBody,
+                          ),
+                        ),
                 )
               else
                 SizedBox(width: contentWidth, child: pageBody),
@@ -277,6 +341,102 @@ class _BrandMark extends StatelessWidget {
   }
 }
 
+/// Matches [NavigationRail] destination look; sits above the rail divider.
+class _TopRailButton extends StatelessWidget {
+  const _TopRailButton({
+    required this.extended,
+    required this.selected,
+    required this.label,
+    required this.icon,
+    required this.selectedIcon,
+    required this.onTap,
+  });
+
+  final bool extended;
+  final bool selected;
+  final String label;
+  final IconData icon;
+  final IconData selectedIcon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final railIcon = Icon(
+      selected ? selectedIcon : icon,
+      size: 24,
+    );
+    final indicator = AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      width: 56,
+      height: 32,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: selected ? scheme.secondaryContainer : Colors.transparent,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: IconTheme(
+        data: IconThemeData(
+          color: selected ? scheme.onSecondaryContainer : scheme.onSurfaceVariant,
+          size: 24,
+        ),
+        child: railIcon,
+      ),
+    );
+
+    final labelStyle = theme.textTheme.labelMedium?.copyWith(
+      color: selected ? scheme.onSurface : scheme.onSurfaceVariant,
+      fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+    );
+
+    final child = extended
+        ? Row(
+            children: [
+              const SizedBox(width: 8),
+              indicator,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: labelStyle,
+                ),
+              ),
+            ],
+          )
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              indicator,
+              if (selected) ...[
+                const SizedBox(height: 4),
+                Text(label, style: labelStyle?.copyWith(fontSize: 12)),
+              ],
+            ],
+          );
+
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(extended ? 28 : 16),
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            vertical: extended ? 4 : 0,
+            horizontal: extended ? 0 : 4,
+          ),
+          child: SizedBox(
+            width: extended ? 148 : 56,
+            child: child,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ─── Profiles ───────────────────────────────────────────────────────────────
 
 class _GroupsPage extends StatelessWidget {
@@ -295,6 +455,70 @@ class _GroupsPage extends StatelessWidget {
     return WorkflowGroupsTab(
       key: ValueKey('nav-groups-${account.id}'),
       accountId: account.id,
+    );
+  }
+}
+
+class _CatalogGroupsPage extends StatelessWidget {
+  const _CatalogGroupsPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Группы',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18),
+              ),
+              SizedBox(height: 2),
+              Text(
+                'Парсинг, свои ссылки и распределение между родительскими аккаунтами',
+                style: TextStyle(fontSize: 12, color: Colors.white54),
+              ),
+            ],
+          ),
+        ),
+        Expanded(child: GroupsPanel(key: ValueKey('nav-catalog-groups'))),
+        MapLogPanel(),
+      ],
+    );
+  }
+}
+
+class _CampaignsPage extends StatelessWidget {
+  const _CampaignsPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: EdgeInsets.fromLTRB(16, 16, 16, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Рассылка',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18),
+              ),
+              SizedBox(height: 2),
+              Text(
+                'Кто шлёт, шаблоны сообщений, запуск и история отправок',
+                style: TextStyle(fontSize: 12, color: Colors.white54),
+              ),
+            ],
+          ),
+        ),
+        Expanded(child: CampaignsPanel(key: ValueKey('nav-campaigns'))),
+        MapLogPanel(),
+      ],
     );
   }
 }
@@ -344,6 +568,21 @@ class _JournalPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const PipelineJournalPanel(key: ValueKey('nav-journal'));
+  }
+}
+
+class _AccountsPage extends StatelessWidget {
+  const _AccountsPage();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(child: AccountsPanel(key: ValueKey('nav-accounts'))),
+        MapLogPanel(),
+      ],
+    );
   }
 }
 

@@ -216,7 +216,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, ctrl.text),
-            child: const Text('Добавить матке'),
+            child: const Text('Добавить родителю'),
           ),
         ],
       ),
@@ -274,7 +274,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
     }
 
     final modeLabel = _inviteById
-        ? 'по ID (матка войдёт и пригласит дочек)'
+        ? 'по ID (родитель войдёт и пригласит дочек)'
         : 'по ссылкам (дочки входят сами)';
 
     final go = await showDialog<bool>(
@@ -375,7 +375,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
           builder: (ctx) => AlertDialog(
             title: const Text('Переназначить группы?'),
             content: Text(
-              '${conflicts.length} уже закреплены за другой маткой. Перенести?',
+              '${conflicts.length} уже закреплены за другим родителем. Перенести?',
             ),
             actions: [
               TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
@@ -434,7 +434,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                     DropdownButtonFormField<String>(
                       value: motherId,
                       decoration: const InputDecoration(
-                        labelText: 'Аккаунт (матка / соло)',
+                        labelText: 'Аккаунт (родитель / один)',
                         isDense: true,
                         border: OutlineInputBorder(),
                       ),
@@ -458,7 +458,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                     ),
                     const SizedBox(height: 12),
                     Text(
-                      'Дочерние (необязательно — без них соло-режим):',
+                      'Дочерние (необязательно — без них работает один):',
                       style: TextStyle(
                         fontSize: 12,
                         color: Theme.of(ctx).colorScheme.onSurfaceVariant,
@@ -759,7 +759,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      'Нет кластеров. Создайте аккаунт-матку (можно без дочек — соло).',
+                      'Нет кластеров. Создайте родительский аккаунт (можно без дочерних).',
                       textAlign: TextAlign.center,
                       style: TextStyle(color: scheme.onSurfaceVariant),
                     ),
@@ -783,7 +783,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                   child: DropdownButtonFormField<String>(
                     value: _selectedMotherId,
                     decoration: const InputDecoration(
-                      labelText: 'Матка / аккаунт',
+                      labelText: 'Родитель / аккаунт',
                       border: OutlineInputBorder(),
                       isDense: true,
                     ),
@@ -1029,7 +1029,7 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
                     value: _inviteById,
                     onChanged: locked ? null : (v) => setState(() => _inviteById = v ?? false),
                     title: const Text(
-                      'По ID (матка войдёт и пригласит)',
+                      'По ID (родитель войдёт и пригласит)',
                       style: TextStyle(fontSize: 13),
                     ),
                     subtitle: const Text(

@@ -66,7 +66,7 @@ enum ActiveActionKind {
         forwardLinks => 'Пересылка ссылок',
         forwardAndJoin => 'Переслать и вступить',
         childrenJoin => 'Вступление дочерних',
-        motherDeploy => 'Полный цикл матки',
+        motherDeploy => 'Полный цикл родителя',
         massInvite => 'Массовый набор',
         leaveGroups => 'Выход из каналов',
         discoverChannels => 'Поиск каналов',
@@ -95,6 +95,18 @@ enum ActiveActionStatus {
       };
 }
 
+class ActiveActionLogLine {
+  ActiveActionLogLine({
+    required this.message,
+    this.level = 'info',
+    DateTime? time,
+  }) : time = time ?? DateTime.now();
+
+  final DateTime time;
+  final String message;
+  final String level;
+}
+
 class ActiveAction {
   ActiveAction({
     required this.id,
@@ -119,11 +131,32 @@ class ActiveAction {
   int? total;
   DateTime? finishedAt;
 
+  /// Chronological detailed log (newest at the end).
+  final List<ActiveActionLogLine> logs = [];
+  static const int maxLogs = 800;
+
+  /// When set, UI shows a live countdown until this instant.
+  DateTime? waitUntil;
+  String? waitLabel;
+
   bool get isActive => status.isActive;
 
   Duration get elapsed {
     final end = finishedAt ?? DateTime.now();
     return end.difference(startedAt);
+  }
+
+  Duration? get waitRemaining {
+    final until = waitUntil;
+    if (until == null) return null;
+    final rem = until.difference(DateTime.now());
+    if (rem.isNegative) return Duration.zero;
+    return rem;
+  }
+
+  bool get isWaiting {
+    final rem = waitRemaining;
+    return rem != null && rem > Duration.zero;
   }
 
   String get progressLabel {
@@ -132,33 +165,98 @@ class ActiveAction {
     }
     return progressMessage;
   }
+
+  void appendLog(String message, {String level = 'info'}) {
+    final trimmed = message.trim();
+    if (trimmed.isEmpty) return;
+    if (logs.isNotEmpty && logs.last.message == trimmed) return;
+    logs.add(ActiveActionLogLine(message: trimmed, level: level));
+    if (logs.length > maxLogs) {
+      logs.removeRange(0, logs.length - maxLogs);
+    }
+  }
+
+  void beginWait(Duration duration, {String? label}) {
+    if (duration <= Duration.zero) {
+      clearWait();
+      return;
+    }
+    waitUntil = DateTime.now().add(duration);
+    waitLabel = label;
+  }
+
+  void clearWait() {
+    waitUntil = null;
+    waitLabel = null;
+  }
 }
 
 /// Interruptible delay that ends early when [token] is cancelled.
+///
+/// Optional [onTick] is called about once per second with time remaining
+/// (useful for live countdowns in the UI).
 Future<void> delayUnlessCancelled(
   Duration duration, {
   ActionCancelToken? token,
+  void Function(Duration remaining)? onTick,
 }) async {
   if (token == null || token.isCancelled) {
     if (token?.isCancelled != true) {
-      await Future<void>.delayed(duration);
+      if (onTick == null) {
+        await Future<void>.delayed(duration);
+      } else {
+        await _delayWithTicks(duration, onTick: onTick);
+      }
     }
     return;
   }
   final completer = Completer<void>();
   Timer? timer;
+  Timer? tickTimer;
+  final deadline = DateTime.now().add(duration);
+
   void onCancel() {
     if (!completer.isCompleted) completer.complete();
+  }
+
+  void emitTick() {
+    final rem = deadline.difference(DateTime.now());
+    onTick!(rem.isNegative ? Duration.zero : rem);
   }
 
   token.addListener(onCancel);
   timer = Timer(duration, () {
     if (!completer.isCompleted) completer.complete();
   });
+  if (onTick != null) {
+    emitTick();
+    tickTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (completer.isCompleted) return;
+      emitTick();
+    });
+  }
   try {
     await completer.future;
   } finally {
     timer.cancel();
+    tickTimer?.cancel();
     token.removeListener(onCancel);
+  }
+}
+
+Future<void> _delayWithTicks(
+  Duration duration, {
+  required void Function(Duration remaining) onTick,
+}) async {
+  final deadline = DateTime.now().add(duration);
+  while (true) {
+    final rem = deadline.difference(DateTime.now());
+    if (rem <= Duration.zero) {
+      onTick(Duration.zero);
+      return;
+    }
+    onTick(rem);
+    final slice = rem < const Duration(seconds: 1) ? rem : const Duration(seconds: 1);
+    await Future<void>.delayed(slice);
   }
 }

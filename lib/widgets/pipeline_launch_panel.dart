@@ -209,7 +209,7 @@ class _PipelineLaunchPanelState extends State<PipelineLaunchPanel> {
                       FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
                     ],
                     decoration: const InputDecoration(
-                      labelText: 'Пауза между группами (сек)',
+                      labelText: 'КД между группами (сек), 1-й сразу',
                       isDense: true,
                       border: OutlineInputBorder(),
                       helperText: 'Между вступлениями / invite / выходами',
@@ -230,7 +230,7 @@ class _PipelineLaunchPanelState extends State<PipelineLaunchPanel> {
                       ),
                       subtitle: const Text(
                         'Выкл. — воркеры сами по ссылкам. '
-                        'Вкл. — матка inviteUsers, при фейле ссылка + вход.',
+                        'Вкл. — родитель inviteUsers, при фейле ссылка + вход.',
                         style: TextStyle(fontSize: 11),
                       ),
                       controlAffinity: ListTileControlAffinity.leading,
@@ -276,7 +276,7 @@ class _PipelineLaunchPanelState extends State<PipelineLaunchPanel> {
                         title: Text(
                           solo
                               ? '«${summary.mother.label}» · сам'
-                              : 'Матка «${summary.mother.label}» · ${summary.clusterName}',
+                              : 'Родитель «${summary.mother.label}» · ${summary.clusterName}',
                         ),
                         subtitle: Text(
                           solo
