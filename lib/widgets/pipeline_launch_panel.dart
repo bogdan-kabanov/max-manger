@@ -20,21 +20,25 @@ class _PipelineLaunchPanelState extends State<PipelineLaunchPanel> {
   bool _running = false;
   final _log = <String>[];
   late final TextEditingController _delaySec;
+  late final TextEditingController _inviteAfterSec;
 
   @override
   void initState() {
     super.initState();
     _delaySec = TextEditingController(text: '2.5');
+    _inviteAfterSec = TextEditingController(text: '0');
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final ms = context.read<AppState>().rateSettings.motherJoinDelayMs;
-      _delaySec.text = _msToSecText(ms);
+      final rates = context.read<AppState>().rateSettings;
+      _delaySec.text = _msToSecText(rates.motherJoinDelayMs);
+      _inviteAfterSec.text = _msToSecText(rates.inviteAfterJoinDelayMs);
     });
   }
 
   @override
   void dispose() {
     _delaySec.dispose();
+    _inviteAfterSec.dispose();
     super.dispose();
   }
 
@@ -44,8 +48,8 @@ class _PipelineLaunchPanelState extends State<PipelineLaunchPanel> {
     return s.toStringAsFixed(1);
   }
 
-  int _delayMsFromField(int fallback) {
-    final raw = _delaySec.text.trim().replaceAll(',', '.');
+  int _delayMsFromField(TextEditingController controller, int fallback) {
+    final raw = controller.text.trim().replaceAll(',', '.');
     final sec = double.tryParse(raw);
     if (sec == null || sec < 0) return fallback;
     return (sec * 1000).round().clamp(0, 600000);
@@ -53,7 +57,11 @@ class _PipelineLaunchPanelState extends State<PipelineLaunchPanel> {
 
   Future<void> _persistDelay(AppState state) async {
     final next = state.rateSettings.copyWith(
-      motherJoinDelayMs: _delayMsFromField(state.rateSettings.motherJoinDelayMs),
+      motherJoinDelayMs: _delayMsFromField(_delaySec, state.rateSettings.motherJoinDelayMs),
+      inviteAfterJoinDelayMs: _delayMsFromField(
+        _inviteAfterSec,
+        state.rateSettings.inviteAfterJoinDelayMs,
+      ),
     );
     await state.updateRateSettings(next);
   }
@@ -230,12 +238,29 @@ class _PipelineLaunchPanelState extends State<PipelineLaunchPanel> {
                       ),
                       subtitle: const Text(
                         'Выкл. — воркеры сами по ссылкам. '
-                        'Вкл. — родитель inviteUsers, при фейле ссылка + вход.',
+                        'Вкл. — матка входит и приглашает дочек; паузу до invite задайте ниже.',
                         style: TextStyle(fontSize: 11),
                       ),
                       controlAffinity: ListTileControlAffinity.leading,
-                    )
-                  else
+                    ),
+                  if (!solo && _inviteById) ...[
+                    TextField(
+                      controller: _inviteAfterSec,
+                      enabled: !_running,
+                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                      inputFormatters: [
+                        FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+                      ],
+                      decoration: const InputDecoration(
+                        labelText: 'Пауза после входа матки до приглашения (сек)',
+                        isDense: true,
+                        border: OutlineInputBorder(),
+                        helperText: '0 = пригласить сразу после входа в группу',
+                      ),
+                      onEditingComplete: () => _persistDelay(state),
+                    ),
+                  ],
+                  if (solo)
                     const Padding(
                       padding: EdgeInsets.only(top: 8),
                       child: Text(

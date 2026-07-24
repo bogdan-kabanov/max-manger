@@ -2223,13 +2223,16 @@ async function cmdJoinGroups({ token, links, delayMs = 2500 }) {
         results.push({
           hash,
           ok: true,
+          phase: 'join',
           chatId: entry.chatId,
           title: entry.title,
+          alreadyMember: entry.alreadyMember === true || entry.skipped === true,
         });
       } catch (error) {
         results.push({
           hash,
           ok: false,
+          phase: 'join',
           error: error instanceof Error ? error.message : String(error),
         });
       }
@@ -2246,6 +2249,136 @@ async function cmdJoinGroups({ token, links, delayMs = 2500 }) {
     joined: okCount,
     failed: results.length - okCount,
     total: hashes.length,
+  });
+}
+
+/**
+ * Per group: mother joins → immediately invite children (same WS session).
+ * First group starts right away; delayMs only BETWEEN groups.
+ */
+async function cmdJoinThenInvite({
+  token,
+  links,
+  inviteUserIds = [],
+  childTargets = [],
+  childTokens = [],
+  delayMs = 2500,
+  inviteAfterJoinDelayMs = 0,
+}) {
+  if (!token) fail('Укажите токен матки');
+  if (!Array.isArray(links) || links.length === 0) fail('Список ссылок пуст');
+
+  const hashes = [...new Set(links.map(parseJoinHash).filter(Boolean))];
+  if (hashes.length === 0) fail('Не найдено ссылок max.ru/join/…');
+
+  const userIds = [...new Set((inviteUserIds ?? []).map((id) => String(id)).filter(Boolean))];
+  let targets = (childTargets ?? [])
+    .map((t) => ({
+      userId: String(t?.userId ?? '').trim(),
+      token: String(t?.token ?? '').trim(),
+      phone: t?.phone != null ? String(t.phone) : null,
+      proxy: t?.proxy != null && String(t.proxy).trim() ? String(t.proxy).trim() : null,
+    }))
+    .filter((t) => t.userId);
+
+  if (targets.length === 0 && userIds.length > 0) {
+    const tokens = [...new Set((childTokens ?? []).map((t) => String(t).trim()).filter(Boolean))];
+    targets = userIds.map((userId, index) => ({
+      userId,
+      token: tokens[index] ?? tokens[0] ?? '',
+      phone: null,
+      proxy: null,
+    }));
+  }
+
+  if (targets.length === 0) {
+    fail('Укажите ID дочерних аккаунтов для приглашения');
+  }
+
+  const { client, profileId: motherUserId } = await connectWithToken(token);
+  const motherToken = token;
+  const results = [];
+
+  try {
+    const afterJoinMs = Math.min(Math.max(0, Number(inviteAfterJoinDelayMs) || 0), 600000);
+    progress(
+      `Вход+приглашение: ${hashes.length} групп × ${targets.length} дочек`
+        + ` (1-я сразу${delayMs > 0 ? `, КД между группами ${Math.round(delayMs / 1000)}с` : ''}`
+        + `${afterJoinMs > 0 ? `, пауза до приглашения ${Math.round(afterJoinMs / 1000)}с` : ', приглашение сразу после входа'})`,
+    );
+
+    for (let i = 0; i < hashes.length; i++) {
+      const hash = hashes[i];
+      progress(`[${i + 1}/${hashes.length}] матка входит: ${hash.slice(0, 12)}…`);
+      let entry = null;
+      try {
+        await ensureConnected(client, motherToken);
+        entry = await joinIfNotMember(client, hash, motherUserId, progress);
+        results.push({
+          hash,
+          ok: true,
+          phase: 'join',
+          chatId: entry.chatId,
+          title: entry.title,
+          alreadyMember: entry.alreadyMember === true || entry.skipped === true,
+        });
+        const suffix = entry.alreadyMember || entry.skipped ? ' (уже была)' : '';
+        progress(`[${i + 1}/${hashes.length}] ✓ матка в «${entry.title ?? hash.slice(0, 12)}»${suffix}`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        results.push({ hash, ok: false, phase: 'join', error: message });
+        progress(`[${i + 1}/${hashes.length}] ✗ вход матки: ${message}`, 'warn');
+        await sleepBetweenSteps(i, hashes.length, delayMs);
+        continue;
+      }
+
+      const channel = {
+        chatId: entry.chatId,
+        title: entry.title,
+        hash: entry.hash ?? hash,
+        inviteUrl: joinUrl(entry.hash ?? hash),
+        type: entry.type ?? 'CHAT',
+      };
+
+      if (afterJoinMs > 0) {
+        progress(
+          `[${i + 1}/${hashes.length}] пауза ${Math.round(afterJoinMs / 1000)}с перед приглашением…`,
+        );
+        await sleep(afterJoinMs);
+      }
+      progress(
+        `[${i + 1}/${hashes.length}] ${afterJoinMs > 0 ? 'приглашаем' : 'сразу приглашаем'} дочек…`,
+      );
+      for (let j = 0; j < targets.length; j++) {
+        await deliverChildCascade(client, motherToken, channel, targets[j], delayMs, results, progress);
+        await sleepBetweenSteps(j, targets.length, Math.min(Number(delayMs) || 0, 1500));
+      }
+
+      await sleepBetweenSteps(i, hashes.length, delayMs);
+    }
+  } finally {
+    await safeDisconnect(client);
+  }
+
+  const joinedCount = results.filter((r) => r.phase === 'join' && r.ok).length;
+  const invitedCount = results.filter(
+    (r) => r.phase === 'invite' && r.ok && (r.method === 'add_member' || r.method === 'already_member'),
+  ).length;
+  const childJoined = results.filter((r) => r.phase === 'child_join' && r.ok).length;
+  const failed = results.filter((r) => r.ok !== true).length;
+
+  progress(
+    `[Итог] матка вошла: ${joinedCount}/${hashes.length}, приглашений: ${invitedCount}, дочек вступило: ${childJoined}`,
+  );
+
+  ok({
+    results,
+    groups: groupsFromJoinResults(results.filter((r) => r.phase === 'join')),
+    joined: joinedCount,
+    invited: invitedCount + childJoined,
+    failed,
+    total: hashes.length,
+    children: targets.length,
   });
 }
 
@@ -3758,6 +3891,7 @@ const MOTHER_COMMANDS = new Set([
   'scan-chat-invites',
   'resolve-channel-invite',
   'join-groups',
+  'join-then-invite',
   'leave-groups',
   'funnel-setup',
   'funnel-publish',
@@ -3803,6 +3937,9 @@ try {
       break;
     case 'join-groups':
       await cmdJoinGroups(args);
+      break;
+    case 'join-then-invite':
+      await cmdJoinThenInvite(args);
       break;
     case 'leave-groups':
       await cmdLeaveGroups(args);

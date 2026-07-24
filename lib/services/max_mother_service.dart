@@ -406,6 +406,36 @@ class MaxMotherService {
     );
   }
 
+  /// Per group: mother joins, then immediately invites children (one CLI session).
+  static Future<MotherJoinResult> joinThenInvite({
+    required String motherToken,
+    required List<String> links,
+    required List<int> inviteUserIds,
+    List<Map<String, dynamic>> childTargets = const [],
+    List<String> childTokens = const [],
+    int delayMs = 2500,
+    int inviteAfterJoinDelayMs = 0,
+    String? proxy,
+    MotherProgressCallback? onProgress,
+    ActionCancelToken? cancel,
+  }) async {
+    return _run(
+      'join-then-invite',
+      {
+        'token': motherToken,
+        'links': links,
+        'inviteUserIds': inviteUserIds,
+        if (childTargets.isNotEmpty) 'childTargets': childTargets,
+        if (childTokens.isNotEmpty) 'childTokens': childTokens,
+        'delayMs': delayMs,
+        'inviteAfterJoinDelayMs': inviteAfterJoinDelayMs,
+      },
+      onProgress: onProgress,
+      proxy: proxy,
+      cancel: cancel,
+    );
+  }
+
   /// Mother forwards invite links to child accounts in private chat.
   static Future<MotherJoinResult> forwardLinks({
     required String motherToken,

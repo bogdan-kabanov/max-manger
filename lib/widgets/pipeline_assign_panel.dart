@@ -123,16 +123,23 @@ class _PipelineAssignPanelState extends State<PipelineAssignPanel> {
     if (mid == null) return '';
     final cluster = _clusterForMother(state, mid);
     if (cluster == null) return '';
+    final motherIn = state.accountJoinedCatalogChat(accountId: mid, entry: e);
+    final motherPart = motherIn ? 'мать ✓' : 'мать —';
     final childIds = cluster.childAccountIds;
-    final solo = childIds.isEmpty;
-    final total = solo ? 1 : childIds.length;
-    final joined = state.childrenJoinedChat(motherAccountId: mid, chatId: e.chatId);
-    final names = joined.map((a) => a.label).join(', ');
-    final label = solo ? 'акк' : 'дочки';
-    if (joined.isEmpty) {
-      return '$label: никто не вступил (0/$total)';
+    if (childIds.isEmpty) {
+      return motherPart;
     }
-    return '$label: ${joined.length}/$total · $names';
+    final joined = <MaxAccount>[];
+    for (final id in childIds) {
+      if (!state.accountJoinedCatalogChat(accountId: id, entry: e)) continue;
+      final a = state.accountById(id);
+      if (a != null) joined.add(a);
+    }
+    final names = joined.map((a) => a.label).join(', ');
+    if (joined.isEmpty) {
+      return '$motherPart · дочки 0/${childIds.length}';
+    }
+    return '$motherPart · дочки ${joined.length}/${childIds.length} · $names';
   }
 
   Future<void> _clearJoinedMarks(AppState state) async {

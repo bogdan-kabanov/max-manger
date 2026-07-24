@@ -39,6 +39,7 @@ class _MotherPanelState extends State<MotherPanel> {
   bool _cliReady = false;
   bool _loadingGroups = false;
   late final TextEditingController _delayController;
+  late final TextEditingController _inviteAfterController;
   List<MotherGroupChannel> _motherGroups = const [];
   final _selectedGroupIds = <String>{};
   String? _groupsLoadedForMotherId;
@@ -52,6 +53,7 @@ class _MotherPanelState extends State<MotherPanel> {
   void initState() {
     super.initState();
     _delayController = TextEditingController(text: '2.5');
+    _inviteAfterController = TextEditingController(text: '0');
     MaxMotherService.isAvailable().then((v) {
       if (mounted) setState(() => _cliReady = v);
     });
@@ -61,6 +63,7 @@ class _MotherPanelState extends State<MotherPanel> {
   void dispose() {
     _linksController.dispose();
     _delayController.dispose();
+    _inviteAfterController.dispose();
     super.dispose();
   }
 
@@ -68,6 +71,7 @@ class _MotherPanelState extends State<MotherPanel> {
     if (_rateHydrated) return;
     _rateHydrated = true;
     _delayController.text = _msToSecText(settings.motherJoinDelayMs);
+    _inviteAfterController.text = _msToSecText(settings.inviteAfterJoinDelayMs);
   }
 
   static String _msToSecText(int ms) {
@@ -76,11 +80,11 @@ class _MotherPanelState extends State<MotherPanel> {
     return sec.toStringAsFixed(1);
   }
 
-  int _delayMsFromField(TextEditingController controller, int fallbackMs) {
+  int _delayMsFromField(TextEditingController controller, int fallbackMs, {int minMs = 200}) {
     final raw = controller.text.trim().replaceAll(',', '.');
     final sec = double.tryParse(raw);
     if (sec == null) return fallbackMs;
-    return (sec * 1000).round().clamp(200, 120000);
+    return (sec * 1000).round().clamp(minMs, 600000);
   }
 
   int _currentMotherDelayMs(AppState state) {
@@ -92,6 +96,11 @@ class _MotherPanelState extends State<MotherPanel> {
       motherJoinDelayMs: _delayMsFromField(
         _delayController,
         state.rateSettings.motherJoinDelayMs,
+      ),
+      inviteAfterJoinDelayMs: _delayMsFromField(
+        _inviteAfterController,
+        state.rateSettings.inviteAfterJoinDelayMs,
+        minMs: 0,
       ),
     );
     await state.updateRateSettings(next);
@@ -1621,7 +1630,8 @@ class _MotherPanelState extends State<MotherPanel> {
             const SizedBox(height: 4),
             Text(
               'Первый шаг сразу, пауза только между следующими '
-              '(вступление, приглашение дочек, пересылка).',
+              '(вступление, приглашение дочек, пересылка). '
+              'Отдельно можно задать паузу после входа матки до invite.',
               style: theme.textTheme.bodySmall?.copyWith(fontSize: 10, color: theme.hintColor),
             ),
             const SizedBox(height: 8),
@@ -1637,6 +1647,23 @@ class _MotherPanelState extends State<MotherPanel> {
                       labelText: 'КД между шагами (сек), 1-й сразу',
                       isDense: true,
                       border: OutlineInputBorder(),
+                    ),
+                    onEditingComplete: () => _persistRateSettings(state),
+                    onSubmitted: (_) => _persistRateSettings(state),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextField(
+                    enabled: !_running,
+                    controller: _inviteAfterController,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                    style: const TextStyle(fontSize: 12),
+                    decoration: const InputDecoration(
+                      labelText: 'Пауза до приглашения (сек)',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                      helperText: '0 = сразу после входа',
                     ),
                     onEditingComplete: () => _persistRateSettings(state),
                     onSubmitted: (_) => _persistRateSettings(state),

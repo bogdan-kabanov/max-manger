@@ -767,6 +767,29 @@ class AppState extends ChangeNotifier {
     return ids;
   }
 
+  /// Whether [accountId] is recorded as member of this catalog row (real or invite: id).
+  bool accountJoinedCatalogChat({
+    required String accountId,
+    required MaxChannelCatalogEntry entry,
+  }) {
+    final ids = membershipChatIdsFor(accountId);
+    if (ids.contains(entry.chatId)) return true;
+    final hash = entry.inviteHash?.trim();
+    if (hash != null && hash.isNotEmpty) {
+      if (ids.contains('invite:$hash')) return true;
+      // After join, membership is real chatId while row may still be invite: until remap.
+      for (final m in storage.membershipsFor(accountId)) {
+        if (m.title.isNotEmpty &&
+            entry.title.isNotEmpty &&
+            m.title == entry.title &&
+            !entry.chatId.startsWith('invite:')) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   /// Workers of [motherAccountId] who already joined [chatId] (дочки или соло-матка).
   List<MaxAccount> childrenJoinedChat({
     required String motherAccountId,
@@ -1029,7 +1052,6 @@ class AppState extends ChangeNotifier {
       }
       final uniqueGroups = unique.values.toList();
 
-      track('Матка «${mother.label}»: вступление в ${uniqueGroups.length} групп…');
       final joinLinks = [
         for (final g in uniqueGroups)
           if (g.hasInviteLink) g.inviteUrl!,
@@ -1044,10 +1066,115 @@ class AppState extends ChangeNotifier {
       final motherProxyOrNull =
           (motherProxy != null && motherProxy.isNotEmpty) ? motherProxy : null;
 
-      final joinResult = await MaxMotherService.joinGroups(
-        token: mother.apiToken!,
+      final childSlots = [
+        for (final s in motherSlots)
+          if (s.child.id != mother.id) s,
+      ];
+
+      // Solo parent: just join, no invite.
+      if (childSlots.isEmpty) {
+        track('«${mother.label}»: соло — вступление в ${joinLinks.length} групп…');
+        final joinResult = await MaxMotherService.joinGroups(
+          token: mother.apiToken!,
+          links: joinLinks,
+          delayMs: rateSettings.motherJoinDelayMs,
+          proxy: motherProxyOrNull,
+          onProgress: track,
+          cancel: cancel,
+        );
+        if (cancel?.isCancelled == true) break;
+        if (!joinResult.ok && joinResult.results.isEmpty) {
+          final msg = joinResult.message;
+          final tokenDead = RegExp(
+            r'login\.token|FAIL_LOGIN_TOKEN|авторизируйтесь|протух|Ошибка входа',
+            caseSensitive: false,
+          ).hasMatch(msg);
+          track(
+            tokenDead
+                ? '«${mother.label}»: токен протух — $msg'
+                : '«${mother.label}»: вступление не удалось — $msg',
+          );
+          mothersDone++;
+          if (actionId != null) {
+            updateActionProgress(actionId, done: mothersDone, total: byMother.length);
+          }
+          continue;
+        }
+        await recordMembershipsFromJoinResults(
+          motherAccountId: mother.id,
+          children: const [],
+          results: joinResult.results,
+          titleByChatId: {for (final g in uniqueGroups) g.chatId: g.title},
+        );
+        await remapCatalogFromJoinResults(joinResult.results);
+        mothersDone++;
+        if (actionId != null) {
+          updateActionProgress(actionId, done: mothersDone, total: byMother.length);
+        }
+        continue;
+      }
+
+      final inviteUserIds = <int>[];
+      final childTargets = <Map<String, dynamic>>[];
+      final children = <MaxAccount>[];
+      for (final slot in childSlots) {
+        if (cancel?.isCancelled == true) break;
+        await ensureViewerId(slot.child);
+        final fresh = accountById(slot.child.id)!;
+        final viewerId = fresh.viewerId;
+        if (viewerId == null) {
+          track('«${slot.child.label}»: нет viewerId — пропуск');
+          continue;
+        }
+        if (inviteUserIds.contains(viewerId)) continue;
+        inviteUserIds.add(viewerId);
+        children.add(fresh);
+        if (fresh.hasApiSession) {
+          final childProxy = fresh.isolation.proxyServer?.trim();
+          childTargets.add({
+            'userId': viewerId,
+            'token': fresh.apiToken!,
+            if (fresh.phone != null) 'phone': fresh.phone!,
+            if (childProxy != null && childProxy.isNotEmpty) 'proxy': childProxy,
+          });
+        }
+      }
+
+      if (inviteUserIds.isEmpty) {
+        track('«${mother.label}»: нет дочек с viewerId — только вход матки');
+        final joinResult = await MaxMotherService.joinGroups(
+          token: mother.apiToken!,
+          links: joinLinks,
+          delayMs: rateSettings.motherJoinDelayMs,
+          proxy: motherProxyOrNull,
+          onProgress: track,
+          cancel: cancel,
+        );
+        await recordMembershipsFromJoinResults(
+          motherAccountId: mother.id,
+          children: const [],
+          results: joinResult.results,
+          titleByChatId: {for (final g in uniqueGroups) g.chatId: g.title},
+        );
+        await remapCatalogFromJoinResults(joinResult.results);
+        mothersDone++;
+        if (actionId != null) {
+          updateActionProgress(actionId, done: mothersDone, total: byMother.length);
+        }
+        continue;
+      }
+
+      track(
+        '«${mother.label}»: ${joinLinks.length} групп — вход и сразу приглашение '
+        '(${children.map((c) => c.label).join(', ')})…',
+      );
+      final cascade = await MaxMotherService.joinThenInvite(
+        motherToken: mother.apiToken!,
         links: joinLinks,
+        inviteUserIds: inviteUserIds,
+        childTargets: childTargets,
         delayMs: rateSettings.motherJoinDelayMs,
+        inviteAfterJoinDelayMs: rateSettings.inviteAfterJoinDelayMs,
         proxy: motherProxyOrNull,
         onProgress: track,
         cancel: cancel,
@@ -1055,18 +1182,17 @@ class AppState extends ChangeNotifier {
 
       if (cancel?.isCancelled == true) break;
 
-      // CLI died on login / empty response — don't pretend mother succeeded.
-      if (!joinResult.ok && joinResult.results.isEmpty) {
-        final msg = joinResult.message;
+      if (!cascade.ok && cascade.results.isEmpty) {
+        final msg = cascade.message;
         final tokenDead = RegExp(
           r'login\.token|FAIL_LOGIN_TOKEN|авторизируйтесь|протух|Ошибка входа',
           caseSensitive: false,
         ).hasMatch(msg);
         track(
           tokenDead
-              ? '«${mother.label}»: токен протух — ${msg}. '
-                  'Войдите заново (QR / web.max.ru), потом повторите «Вступить / пригласить».'
-              : '«${mother.label}»: вступление не удалось — $msg. Приглашение пропущено.',
+              ? '«${mother.label}»: токен протух — $msg. '
+                  'Войдите заново (QR / web.max.ru), потом повторите.'
+              : '«${mother.label}»: сбой — $msg',
         );
         if (tokenDead) {
           await addPipelineJournal(
@@ -1085,155 +1211,75 @@ class AppState extends ChangeNotifier {
 
       await recordMembershipsFromJoinResults(
         motherAccountId: mother.id,
-        children: const [],
-        results: joinResult.results,
+        children: children,
+        results: cascade.results,
         titleByChatId: {for (final g in uniqueGroups) g.chatId: g.title},
       );
-      await remapCatalogFromJoinResults(joinResult.results);
+      await remapCatalogFromJoinResults(cascade.results);
 
-      // hash / synthetic catalog id → real chatId after mother join
-      final resolvedChatId = <String, String>{};
-      for (final row in joinResult.results) {
+      final invitedNow = cascade.invited;
+      invitedTotal += invitedNow;
+
+      await addPipelineJournal(
+        kind: PipelineJournalKind.joinById,
+        message: invitedNow > 0
+            ? '«${mother.label}»: вход ${cascade.joined}, приглашений $invitedNow'
+            : '«${mother.label}»: вход ${cascade.joined}, приглашений 0 — ${cascade.message}',
+        motherAccountId: mother.id,
+      );
+
+      // Post-join templates for children that got into chats.
+      final chatIdsByChild = <String, List<String>>{};
+      for (final row in cascade.results) {
         if (row['ok'] != true) continue;
+        final phase = row['phase']?.toString();
+        final method = row['method']?.toString();
+        final childJoined = phase == 'child_join';
+        final invitedOk = phase == 'invite' &&
+            (method == 'add_member' || method == 'already_member');
+        if (!childJoined && !invitedOk) continue;
         final chatId = row['chatId']?.toString().trim() ?? '';
         if (chatId.isEmpty) continue;
-        final hash = row['hash']?.toString().trim() ?? '';
-        if (MotherGroupChannel.isValidInviteHash(hash)) {
-          resolvedChatId[hash] = chatId;
-          resolvedChatId['invite:$hash'] = chatId;
-        }
-      }
-      for (final e in channelCatalog) {
-        if (e.hasInviteLink && !e.chatId.startsWith('invite:')) {
-          resolvedChatId[e.inviteHash!] = e.chatId;
-          resolvedChatId['invite:${e.inviteHash!}'] = e.chatId;
-        }
-      }
-
-      String? realChatIdFor(MaxChannelCatalogEntry g) {
-        if (g.chatId.isNotEmpty && !g.chatId.startsWith('invite:')) {
-          return g.chatId;
-        }
-        if (g.hasInviteLink && resolvedChatId.containsKey(g.inviteHash)) {
-          return resolvedChatId[g.inviteHash];
-        }
-        return resolvedChatId[g.chatId];
-      }
-
-      for (final slot in motherSlots) {
-        if (cancel?.isCancelled == true) break;
-        await ensureViewerId(slot.child);
-        final fresh = accountById(slot.child.id)!;
-        final viewerId = fresh.viewerId;
-        if (viewerId == null) {
-          track('«${slot.child.label}»: нет viewerId — пропуск invite');
-          continue;
-        }
-
-        final resolvedGroups = <MaxChannelCatalogEntry>[];
-        final chatIds = <String>[];
-        final groupsPayload = <Map<String, dynamic>>[];
-        for (final g in slot.groups) {
-          final chatId = realChatIdFor(g);
-          if (chatId == null || chatId.isEmpty) {
-            track('«${slot.child.label}»: нет chatId для «${g.title}» — пропуск');
-            continue;
+        final userId = row['childUserId']?.toString();
+        MaxAccount? child;
+        for (final c in children) {
+          if (c.viewerId != null && c.viewerId.toString() == userId) {
+            child = c;
+            break;
           }
-          resolvedGroups.add(g);
-          chatIds.add(chatId);
-          groupsPayload.add({
-            'chatId': chatId,
-            'title': g.title,
-            if (g.inviteHash != null) 'hash': g.inviteHash,
-          });
         }
-        if (chatIds.isEmpty) {
-          track('«${slot.child.label}»: нечего приглашать');
-          continue;
-        }
+        if (child == null) continue;
+        chatIdsByChild.putIfAbsent(child.id, () => <String>[]).add(chatId);
+      }
 
-        track('Приглашение «${slot.child.label}» → ${chatIds.length} групп (каскад ID→ссылка)');
-        final childTargets = <Map<String, dynamic>>[];
-        if (fresh.hasApiSession) {
-          final childProxy = fresh.isolation.proxyServer?.trim();
-          childTargets.add({
-            'userId': viewerId,
-            'token': fresh.apiToken!,
-            if (fresh.phone != null) 'phone': fresh.phone!,
-            if (childProxy != null && childProxy.isNotEmpty) 'proxy': childProxy,
-          });
-        }
-        final inviteResult = await MaxMotherService.inviteChildren(
-          motherToken: mother.apiToken!,
-          links: const [],
-          groups: groupsPayload,
-          chatIds: chatIds,
-          inviteUserIds: [viewerId],
-          childTargets: childTargets,
-          delayMs: rateSettings.motherJoinDelayMs,
-          proxy: motherProxyOrNull,
-          onProgress: track,
+      for (final child in children) {
+        final chatIds = chatIdsByChild[child.id];
+        if (chatIds == null || chatIds.isEmpty) continue;
+        final template = joinTemplateForAccount(child.id);
+        if (template == null || !template.isActive) continue;
+        final channelLinks = await ensureChannelInviteLinks(
+          [child],
+          onLog: (msg, {String level = 'info'}) => track(msg),
           cancel: cancel,
         );
-        invitedTotal += inviteResult.invited + inviteResult.joined;
-
-        if (!inviteResult.ok && inviteResult.results.isEmpty) {
-          track(
-            '«${slot.child.label}»: приглашение оборвалось — ${inviteResult.message}',
-          );
-        } else if (inviteResult.invited + inviteResult.joined == 0) {
-          track(
-            '«${slot.child.label}»: 0 приглашений'
-            '${inviteResult.message.isNotEmpty ? ' (${inviteResult.message})' : ''}'
-            '${inviteResult.failed > 0 ? ', ошибок: ${inviteResult.failed}' : ''}',
-          );
-        }
-
-        await recordMembershipsFromJoinResults(
-          motherAccountId: mother.id,
-          children: [fresh],
-          results: inviteResult.results,
-          titleByChatId: {
-            for (var i = 0; i < resolvedGroups.length; i++)
-              chatIds[i]: resolvedGroups[i].title,
-          },
+        await ChildPostJoinRunner.runPerAccountChats(
+          children: [child],
+          chatIdsByAccountId: {child.id: chatIds},
+          templateFor: (_) => template,
+          channelLinkFor: (c) =>
+              channelLinks[c.id] ?? channelPolicyFor(c.id).lastCreatedInviteUrl,
+          onChatsSent: (c, sentChatIds, {messageIdsByChatId = const {}, titleByChatId = const {}}) =>
+              rememberTemplateSends(
+                child: c,
+                chatIds: sentChatIds,
+                templateId: template.id,
+                messageIdsByChatId: messageIdsByChatId,
+                titleByChatId: titleByChatId,
+              ),
+          onLog: (msg, {String level = 'info'}) => track(msg),
+          rateSettings: rateSettings,
+          cancel: cancel,
         );
-        await addPipelineJournal(
-          kind: PipelineJournalKind.joinById,
-          message: inviteResult.invited + inviteResult.joined > 0
-              ? '«${slot.child.label}»: приглашений ${inviteResult.invited}'
-              : '«${slot.child.label}»: приглашений 0 — ${inviteResult.message}',
-          motherAccountId: mother.id,
-          childAccountId: slot.child.id,
-        );
-
-        final template = joinTemplateForAccount(slot.child.id);
-        if (template != null && template.isActive && inviteResult.invited > 0) {
-          final channelLinks = await ensureChannelInviteLinks(
-            [fresh],
-            onLog: (msg, {String level = 'info'}) => track(msg),
-            cancel: cancel,
-          );
-          await ChildPostJoinRunner.runPerAccountChats(
-            children: [fresh],
-            chatIdsByAccountId: {fresh.id: chatIds},
-            templateFor: (_) => template,
-            channelLinkFor: (child) =>
-                channelLinks[child.id] ??
-                channelPolicyFor(child.id).lastCreatedInviteUrl,
-            onChatsSent: (child, sentChatIds, {messageIdsByChatId = const {}, titleByChatId = const {}}) =>
-                rememberTemplateSends(
-                  child: child,
-                  chatIds: sentChatIds,
-                  templateId: template.id,
-                  messageIdsByChatId: messageIdsByChatId,
-                  titleByChatId: titleByChatId,
-                ),
-            onLog: (msg, {String level = 'info'}) => track(msg),
-            rateSettings: rateSettings,
-            cancel: cancel,
-          );
-        }
       }
 
       mothersDone++;
@@ -1245,9 +1291,9 @@ class AppState extends ChangeNotifier {
     final message = cancel?.isCancelled == true
         ? 'Остановлено: маток $mothersDone, приглашений $invitedTotal'
         : invitedTotal > 0
-            ? 'Готово (по ID): маток $mothersDone, приглашений $invitedTotal'
-            : 'По ID без приглашений: маток $mothersDone'
-                '${rateSettings.motherJoinDelayMs >= 60000 ? ' · пауза ${rateSettings.motherJoinDelayMs ~/ 1000}с — на десятки групп это часы' : ''}';
+            ? 'Готово (вход→приглашение): маток $mothersDone, приглашений $invitedTotal'
+            : 'Без приглашений: маток $mothersDone'
+                '${rateSettings.motherJoinDelayMs >= 60000 ? ' · пауза ${rateSettings.motherJoinDelayMs ~/ 1000}с' : ''}';
     return (invited: invitedTotal, mothers: mothersDone, message: message);
   }
 
@@ -1747,7 +1793,11 @@ class AppState extends ChangeNotifier {
       final method = row['method']?.toString();
       final title = (row['title']?.toString() ?? titleByChatId[chatId] ?? '').trim();
 
-      if (phase == 'join' && motherAccountId != null) {
+      if (motherAccountId != null &&
+          (phase == 'join' ||
+              (phase == null &&
+                  row['childUserId'] == null &&
+                  row['childIndex'] == null))) {
         items.add(AccountGroupMembership(
           accountId: motherAccountId,
           chatId: chatId,

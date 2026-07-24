@@ -35,13 +35,50 @@ class _GroupsPanelState extends State<GroupsPanel> {
   bool _joining = false;
   /// Parent joins and invites children by ID (for non-RU kids). Else join by invite links.
   bool _inviteById = true;
+  late final TextEditingController _inviteAfterSec;
+  bool _inviteAfterHydrated = false;
 
   Set<String> get _selected => _selectedChatIds.value;
 
   @override
+  void initState() {
+    super.initState();
+    _inviteAfterSec = TextEditingController(text: '0');
+  }
+
+  @override
   void dispose() {
     _selectedChatIds.dispose();
+    _inviteAfterSec.dispose();
     super.dispose();
+  }
+
+  static String _msToSecText(int ms) {
+    final s = ms / 1000;
+    if (s == s.roundToDouble()) return s.round().toString();
+    return s.toStringAsFixed(1);
+  }
+
+  void _hydrateInviteAfter(AppState state) {
+    if (_inviteAfterHydrated) return;
+    _inviteAfterHydrated = true;
+    _inviteAfterSec.text = _msToSecText(state.rateSettings.inviteAfterJoinDelayMs);
+  }
+
+  int _inviteAfterMsFromField(int fallback) {
+    final raw = _inviteAfterSec.text.trim().replaceAll(',', '.');
+    final sec = double.tryParse(raw);
+    if (sec == null || sec < 0) return fallback;
+    return (sec * 1000).round().clamp(0, 600000);
+  }
+
+  Future<void> _persistInviteAfter(AppState state) async {
+    final next = state.rateSettings.copyWith(
+      inviteAfterJoinDelayMs: _inviteAfterMsFromField(
+        state.rateSettings.inviteAfterJoinDelayMs,
+      ),
+    );
+    await state.updateRateSettings(next);
   }
 
   void _clearSelection() {
@@ -152,12 +189,18 @@ class _GroupsPanelState extends State<GroupsPanel> {
     if (mid == null) return '—';
     final cluster = _clusterForMother(state, mid);
     if (cluster == null) return '—';
+    final motherIn = state.accountJoinedCatalogChat(accountId: mid, entry: e);
+    final motherPart = motherIn ? 'мать ✓' : 'мать —';
+
     final childIds = cluster.childAccountIds;
-    final solo = childIds.isEmpty;
-    final total = solo ? 1 : childIds.length;
-    final joined = state.childrenJoinedChat(motherAccountId: mid, chatId: e.chatId);
-    final label = solo ? 'акк' : 'дочки';
-    return '$label ${joined.length}/$total';
+    if (childIds.isEmpty) {
+      return motherPart;
+    }
+    var n = 0;
+    for (final id in childIds) {
+      if (state.accountJoinedCatalogChat(accountId: id, entry: e)) n++;
+    }
+    return '$motherPart · дочки $n/${childIds.length}';
   }
 
   String _sourceLabel(MaxChannelCatalogEntry e) {
@@ -800,6 +843,9 @@ class _GroupsPanelState extends State<GroupsPanel> {
     );
     if (go != true || !mounted) return;
 
+    await _persistInviteAfter(state);
+    if (!mounted) return;
+
     setState(() => _joining = true);
     final action = state.beginAction(
       kind: useInviteById ? ActiveActionKind.inviteChildren : ActiveActionKind.childrenJoin,
@@ -928,6 +974,7 @@ class _GroupsPanelState extends State<GroupsPanel> {
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     _ensureMothers(state);
+    _hydrateInviteAfter(state);
     final mothers = _mothers(state);
     final rows = _filtered(state);
     final total = state.channelCatalog.length;
@@ -1058,8 +1105,30 @@ class _GroupsPanelState extends State<GroupsPanel> {
                         ? null
                         : (v) => setState(() => _inviteById = v),
                     tooltip:
-                        'Вкл: родитель войдёт и пригласит дочек. Выкл: вступление по ссылкам. Соло-родитель всегда входит сам.',
+                        'Вкл: матка входит и приглашает дочек. '
+                        'Паузу до приглашения задайте справа. '
+                        'Выкл: вступление по ссылкам. Соло-родитель всегда входит сам.',
                   ),
+                  if (_inviteById)
+                    SizedBox(
+                      width: 168,
+                      child: TextField(
+                        controller: _inviteAfterSec,
+                        enabled: !_busy && !_parsing && !_joining,
+                        keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        inputFormatters: [
+                          FilteringTextInputFormatter.allow(RegExp(r'[0-9.,]')),
+                        ],
+                        decoration: const InputDecoration(
+                          labelText: 'Пауза до приглашения (сек)',
+                          isDense: true,
+                          border: OutlineInputBorder(),
+                          helperText: '0 = сразу после входа',
+                        ),
+                        onEditingComplete: () => _persistInviteAfter(state),
+                        onSubmitted: (_) => _persistInviteAfter(state),
+                      ),
+                    ),
                   if (mothers.isNotEmpty) ...[
                     SizedBox(
                       width: 200,
